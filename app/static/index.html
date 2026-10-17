@@ -1,0 +1,156 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>EV Charge Live Monitor</title>
+    <!-- Leaflet CSS -->
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin=""/>
+    <link rel="stylesheet" href="static/style.css?v=8">
+</head>
+<body>
+    <div class="app-container">
+        <!-- Header -->
+        <header class="app-header">
+            <div class="header-left">
+                <span class="logo-icon">⚡</span>
+                <h1>EV Charge Live</h1>
+                <span id="sync-status" class="badge badge-success">
+                    <span class="pulse-dot"></span>
+                    <span class="badge-text">Live Sync aktiv</span>
+                </span>
+            </div>
+            <div class="header-right">
+                <button id="btn-favorites" class="btn btn-secondary" title="Favoriten / HA-Sensoren anzeigen">
+                    <span class="btn-icon">⭐</span>
+                    <span class="btn-text">Favoriten</span>
+                    <span class="btn-badge">(<span id="fav-count">0</span>)</span>
+                </button>
+                <button id="btn-settings" class="btn btn-secondary" title="Einstellungen">
+                    <span class="btn-icon">⚙️</span>
+                    <span class="btn-text">Einstellungen</span>
+                </button>
+                <button id="btn-sync" class="btn btn-primary" title="Live Synchronisation jetzt erzwingen">
+                    <span class="btn-icon">🔄</span>
+                    <span class="btn-text">Sync</span>
+                </button>
+            </div>
+        </header>
+
+        <!-- Search & Filter Bar -->
+        <div class="search-bar">
+            <div class="search-inputs">
+                <input type="text" id="input-city" placeholder="Ort (z.B. Hockenheim)" value="Hockenheim">
+                <input type="text" id="input-zip" placeholder="PLZ (z.B. 68766)" value="68766">
+                <select id="select-radius">
+                    <option value="2000">Umkreis 2 km</option>
+                    <option value="5000" selected>Umkreis 5 km</option>
+                    <option value="10000">Umkreis 10 km</option>
+                    <option value="20000">Umkreis 20 km</option>
+                </select>
+                <button id="btn-search" class="btn btn-primary">Suchen</button>
+            </div>
+            <div class="quick-tags">
+                <span class="tag-title">Schnellauswahl:</span>
+                <button class="tag-btn tag-btn-highlight" id="btn-current-location" onclick="applyCurrentLocation()">📍 Aktueller Standort (Xiaomi)</button>
+                <button class="tag-btn" onclick="applyQuickSearch('Hockenheim', '68766')">Stadtwerke Hockenheim</button>
+                <button class="tag-btn" onclick="applyQuickSearch('Schwetzingen', '68723')">Schwetzingen</button>
+                <button class="tag-btn" onclick="applyQuickSearch('Speyer', '67346')">Speyer</button>
+                <button class="tag-btn" onclick="applyQuickSearch('Walldorf', '69190')">Walldorf</button>
+            </div>
+        </div>
+
+        <!-- Main Map Area -->
+        <main class="main-content">
+            <div id="map"></div>
+        </main>
+    </div>
+
+    <!-- Modal: Favorites -->
+    <div id="modal-favorites" class="modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h2>⭐ Überwachte Favoriten (HA-Sensoren)</h2>
+                <button class="btn-close" onclick="closeModal('modal-favorites')">&times;</button>
+            </div>
+            <div class="modal-body">
+                <p class="hint">Diese Stationen werden alle 60 Sek. aktualisiert und senden eine Push-Meldung, sobald ein Ladeplatz frei wird.</p>
+                <div id="favorites-list" class="favorites-grid">
+                    <!-- Populated by JS -->
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Modal: Settings -->
+    <div id="modal-settings" class="modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h2>⚙️ Add-on Konfiguration</h2>
+                <button class="btn-close" onclick="closeModal('modal-settings')">&times;</button>
+            </div>
+            <div class="modal-body">
+                <form id="settings-form">
+                    <div class="section-title">⏱️ Abruf-Intervall</div>
+                    <div class="form-group">
+                        <label for="cfg-interval">Polling-Intervall (Sekunden):</label>
+                        <input type="number" id="cfg-interval" min="15" max="600" value="60">
+                    </div>
+
+                    <div class="section-title">📲 Push-Benachrichtigungen</div>
+                    <div class="form-group-checkbox">
+                        <input type="checkbox" id="cfg-notify-enabled" checked>
+                        <label for="cfg-notify-enabled">Push-Meldung senden, sobald Platz frei wird</label>
+                    </div>
+                    <div class="form-group">
+                        <label for="cfg-notify-service">Home Assistant Notify-Dienst:</label>
+                        <input type="text" id="cfg-notify-service" placeholder="notify.notify" value="notify.notify">
+                        <small>Beispiele: <code>notify.notify</code> (an alle Smartphones) oder <code>notify.mobile_app_stephan</code></small>
+                    </div>
+                    <div class="form-group">
+                        <label for="cfg-notify-cooldown">Cooldown (Minuten pro Station):</label>
+                        <input type="number" id="cfg-notify-cooldown" min="1" max="120" value="10">
+                        <small>Verhindert Mehrfachmeldungen bei kurzem Ein-/Ausstecken.</small>
+                    </div>
+                    <div class="form-group">
+                        <label for="cfg-title-tpl">Benachrichtigungs-Titel:</label>
+                        <input type="text" id="cfg-title-tpl" value="⚡ Ladestation frei: {station_name}">
+                    </div>
+                    <div class="form-group">
+                        <label for="cfg-msg-tpl">Benachrichtigungs-Text:</label>
+                        <textarea id="cfg-msg-tpl" rows="2">An {station_name} ({address}) sind jetzt {free_slots} von {total_slots} Plätzen frei!</textarea>
+                    </div>
+
+                    <div class="section-title">🏠 Home Assistant Integration</div>
+                    <div class="form-group">
+                        <label for="cfg-device-tracker-entity">Smartphone-Standortgeber (Device Tracker):</label>
+                        <input type="text" id="cfg-device-tracker-entity" value="device_tracker.2407fpn8eg">
+                        <small>Entität deines Xiaomi Handys in Home Assistant (für 'Aktueller Standort').</small>
+                    </div>
+                    <div class="form-group">
+                        <label for="cfg-prefix">Sensor-Präfix in Home Assistant:</label>
+                        <input type="text" id="cfg-prefix" value="sensor.ev_charge_">
+                    </div>
+                    <div class="form-group-checkbox">
+                        <input type="checkbox" id="cfg-device-tracker" checked>
+                        <label for="cfg-device-tracker">Device Tracker für Säulen auf der HA-Karte erzeugen</label>
+                    </div>
+                    <div class="form-group-checkbox">
+                        <input type="checkbox" id="cfg-fire-events" checked>
+                        <label for="cfg-fire-events">Event 'ev_charge_slot_freed' im HA-Eventbus feuern</label>
+                    </div>
+
+                    <div class="modal-footer">
+                        <button type="button" id="btn-test-push" class="btn btn-secondary">🔔 Test-Push an Smartphone senden</button>
+                        <button type="submit" class="btn btn-primary">💾 Speichern</button>
+                    </div>
+                </form>
+            </div>
+        </div>
+    </div>
+
+    <!-- Leaflet JS -->
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+    <script src="static/app.js?v=8"></script>
+</body>
+</html>

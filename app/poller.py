@@ -1,0 +1,214 @@
+import asyncio
+import datetime
+import logging
+import os
+import re
+from typing import Any, Dict, Optional
+from zoneinfo import ZoneInfo
+import httpx
+
+from .client import ev_client
+from .notifier import notifier
+from .storage import storage
+
+_LOGGER = logging.getLogger("ev_charge_live.poller")
+BERLIN_TZ = ZoneInfo("Europe/Berlin")
+
+SUPERVISOR_URL = "http://supervisor/core/api"
+
+
+def slugify(text: str) -> str:
+    """Transforms a string into a safe entity_id component."""
+    text = text.lower()
+    text = re.sub(r"[äÄ]", "ae", text)
+    text = re.sub(r"[öÖ]", "oe", text)
+    text = re.sub(r"[üÜ]", "ue", text)
+    text = re.sub(r"[ß]", "ss", text)
+    text = re.sub(r"[^a-z0-9_]+", "_", text)
+    return text.strip("_")
+
+
+class SyncWorker:
+    def __init__(self) -> None:
+        self._running = False
+        self._task: Optional[asyncio.Task] = None
+        self._previous_states: Dict[str, Dict[str, Any]] = {}
+        self._token = os.getenv("SUPERVISOR_TOKEN", "")
+        self._lock = asyncio.Lock()
+
+    def start(self) -> None:
+        if self._running:
+            return
+        self._running = True
+        self._task = asyncio.create_task(self._run_loop())
+        _LOGGER.info("EV Charge Live background poller started.")
+
+    def stop(self) -> None:
+        self._running = False
+        if self._task:
+            self._task.cancel()
+        _LOGGER.info("EV Charge Live background poller stopped.")
+
+    async def _run_loop(self) -> None:
+        while self._running:
+            try:
+                await self.sync_favorites()
+            except asyncio.CancelledError:
+                break
+            except Exception as err:
+                _LOGGER.error("Error in sync loop: %s", err, exc_info=True)
+
+            config = storage.load_config()
+            interval = config.get("polling", {}).get("interval_seconds", 60)
+            await asyncio.sleep(max(15, interval))
+
+    async def sync_favorites(self) -> None:
+        """Fetches live status for all favorited stations and updates Home Assistant."""
+        async with self._lock:
+            favorites = storage.load_favorites()
+            if not favorites:
+                _LOGGER.debug("No favorites configured to sync.")
+                return
+
+            config = storage.load_config()
+            live_map: Dict[str, Dict[str, Any]] = {}
+
+            for fav in favorites:
+                station_id = str(fav.get("id"))
+                try:
+                    live_station = await ev_client.get_station_by_id(station_id)
+                    if not live_station:
+                        _LOGGER.warning("Could not fetch station %s, keeping previous state", station_id)
+                        live_map[station_id] = fav
+                        continue
+
+                    live_map[station_id] = live_station
+
+                    # Check state transition for push notifications
+                    prev = self._previous_states.get(station_id)
+                    if prev:
+                        prev_free = prev.get("free_slots", 0)
+                        curr_free = live_station.get("free_slots", 0)
+
+                        # Trigger: previously 0 free (or less) and now newly free slots available!
+                        if curr_free > 0 and (prev_free == 0 or curr_free > prev_free):
+                            _LOGGER.info(
+                                "⚡ Free slot detected at %s! (Previous: %d, Now: %d)",
+                                live_station.get("name"), prev_free, curr_free
+                            )
+                            await notifier.notify_slot_freed(live_station, config)
+
+                        # Optional: Notify when completely full
+                        notify_cfg = config.get("notifications", {})
+                        if notify_cfg.get("notify_on_all_busy", False) and prev_free > 0 and curr_free == 0:
+                            _LOGGER.info("Station %s became fully occupied.", live_station.get("name"))
+
+                    self._previous_states[station_id] = live_station
+
+                    # Push sensor state to Home Assistant Core
+                    await self._push_to_home_assistant(live_station, config)
+
+                except Exception as err:
+                    _LOGGER.error("Failed to sync station %s: %s", station_id, err)
+                    live_map[station_id] = fav
+
+            storage.update_favorites_live(live_map)
+
+    async def _push_to_home_assistant(self, station: Dict[str, Any], config: Dict[str, Any]) -> None:
+        """Pushes state and rich attributes to Home Assistant REST states endpoint."""
+        if not self._token:
+            _LOGGER.debug("No SUPERVISOR_TOKEN available, skipping HA sensor update.")
+            return
+
+        ha_cfg = config.get("home_assistant_integration", {})
+        prefix = ha_cfg.get("entity_prefix", "sensor.ev_charge_")
+        
+        # Clean slug for entity_id
+        safe_name = slugify(f"{station.get('operator', '')}_{station.get('address', '')}")
+        if not safe_name:
+            safe_name = f"station_{station.get('id')}"
+        entity_id = f"{prefix}{safe_name}"
+
+        # State text
+        free_slots = station.get("free_slots", 0)
+        total_slots = station.get("total_slots", 0)
+        status = station.get("status", "AVAILABLE")
+
+        if status == "OUTOFORDER":
+            state = "Außer Betrieb"
+        elif free_slots == 0:
+            state = "Belegt"
+        elif free_slots == total_slots:
+            state = "Frei"
+        else:
+            state = "Teilweise belegt"
+
+        connectors_summary = [
+            f"{c.get('standard')} ({c.get('power_kw')} kW)"
+            for c in station.get("connectors", [])
+        ]
+
+        attributes = {
+            "friendly_name": station.get("name") or station.get("address"),
+            "station_id": station.get("id"),
+            "operator": station.get("operator"),
+            "address": station.get("address"),
+            "postal_code": station.get("postal_code"),
+            "city": station.get("city"),
+            "free_slots": free_slots,
+            "total_slots": total_slots,
+            "occupied_slots": station.get("occupied_slots", 0),
+            "status_code": status,
+            "connectors": connectors_summary,
+            "connector_details": station.get("connectors", []),
+            "max_power_kw": max([c.get("power_kw", 0) for c in station.get("connectors", [])] or [22.0]),
+            "google_maps_url": f"https://www.google.com/maps/dir/?api=1&destination={station.get('latitude')},{station.get('longitude')}",
+            "live_source": station.get("live_source", "MobiData BW"),
+            "latitude": station.get("latitude"),
+            "longitude": station.get("longitude"),
+            "icon": "mdi:ev-station",
+            "last_synced": datetime.datetime.now(tz=BERLIN_TZ).isoformat()
+        }
+
+        url = f"{SUPERVISOR_URL}/states/{entity_id}"
+        headers = {
+            "Authorization": f"Bearer {self._token}",
+            "Content-Type": "application/json"
+        }
+        payload = {
+            "state": state,
+            "attributes": attributes
+        }
+
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                resp = await client.post(url, json=payload, headers=headers)
+                if resp.status_code in (200, 201):
+                    _LOGGER.debug("Pushed state for %s -> %s", entity_id, state)
+                else:
+                    _LOGGER.error("Failed to push state for %s: %s", entity_id, resp.text)
+        except Exception as err:
+            _LOGGER.error("Error pushing state to HA: %s", err)
+
+        # Optional Device Tracker
+        if ha_cfg.get("create_device_tracker", True) and station.get("latitude") and station.get("longitude"):
+            tracker_id = f"device_tracker.ev_charge_{safe_name}"
+            tracker_payload = {
+                "state": "home" if free_slots > 0 else "not_home",
+                "attributes": {
+                    "friendly_name": f"Standort {station.get('name')}",
+                    "latitude": station.get("latitude"),
+                    "longitude": station.get("longitude"),
+                    "source_type": "gps",
+                    "icon": "mdi:ev-station",
+                    "free_slots": free_slots
+                }
+            }
+            try:
+                async with httpx.AsyncClient(timeout=10.0) as client:
+                    await client.post(f"{SUPERVISOR_URL}/states/{tracker_id}", json=tracker_payload, headers=headers)
+            except Exception as err:
+                _LOGGER.debug("Could not update device tracker: %s", err)
+
+
+poller = SyncWorker()
