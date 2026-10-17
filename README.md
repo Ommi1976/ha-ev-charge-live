@@ -9,14 +9,19 @@ Speziell vorkonfiguriert für alle Ladestationen der **Stadtwerke Hockenheim** s
 ## 🌟 Features
 
 * **100 % Kostenlos & Schlüssellos:** Keine Registrierung, kein kostenpflichtiger API-Key, kein Verfallsdatum.
-* **Stadtwerke Hockenheim inklusive:** Direkte Unterstützung aller Stationen im Stadtgebiet (Schubertstr., Beethovenstr., Ottostr., Untere Mühlstr., Beim Pumpwerk) sowie aller weiteren Betreiber (EnBW, Tesla, Shell, etc.).
+* **Hybrid Real-Time Engine (MobiData BW + EnBW Roaming API):** Sekundengenaue Belegung, reale Ladeleistung in kW (AC/DC), minutengenaue Belegungsdauer (`seit 07:30 Uhr (vor 1 Std. 12 Min.)`) für alle Stationen (inkl. Stadtwerke Hockenheim).
+* **1-Klick-Navigation:**
+  * 🧭 **Google Maps:** Öffnet sofort Route & Android Auto Navigation im Auto.
+  * 🚗 **An Cupra Born:** Sendet Navigationsziel per Home Assistant Event `ev_charge_send_to_cupra` & Push-Meldung ans Auto.
+* **📍 Smartphone-GPS (Xiaomi):** 1-Klick Standortermittlung über den Home Assistant `device_tracker` deines Smartphones.
+* **📱 Responsive Touch-UI:** Menüleiste für Smartphones optimiert (Icon-Modus, Wisch-Schnellauswahl, Puls-Status, 44px Touch-Ziele).
 * **Interaktive Ingress-Karte:** Nahtlos in der Home Assistant Seitenleiste integriert (Leaflet mit SVG-Live-Pins für 🟢 Frei, 🟡 Teilweise belegt, 🔴 Vollständig belegt, ⚪ Außer Betrieb).
 * **1-Klick-Favoriten:** Einfach eine Ladesäule auf der Karte anklicken und als Favorit markieren – das Add-on legt sofort einen nativen Home Assistant Sensor dafür an (`sensor.ev_charge_*`).
 * **Smarte Push-Benachrichtigungen:**
   * Erkennt Zustandswechsel (wenn eine belegte Säule wieder freie Slots hat).
   * Sendet Push-Nachrichten an die Home Assistant Companion App (`notify.notify` oder spezifisches Smartphone).
   * Integrierter Spamschutz (**Cooldown** in Minuten).
-  * Anpassbare Nachrichtenvorlagen mit Platzhaltern `{station_name}`, `{address}`, `{free_slots}`, `{total_slots}`.
+  * Anpassbare Nachrichtenvorlagen mit Platzhaltern `{station_name}`, `{address}`, `{free_slots}`, `{total_slots}`, `{max_power_kw}`.
 * **Home Assistant Eventbus:** Feuert bei freigewordenem Platz das Event `ev_charge_slot_freed` für eigene Automationen (z. B. Sprachausgabe über Alexa oder smarte Beleuchtung).
 
 ---
