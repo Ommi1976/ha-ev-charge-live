@@ -1,12 +1,14 @@
 import asyncio
 from contextlib import asynccontextmanager
 import logging
+import math
 import os
+import re
 from typing import Any, Dict, List, Optional
 import httpx
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 
 from .client import ev_client
@@ -17,6 +19,23 @@ from .storage import storage
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 _LOGGER = logging.getLogger("ev_charge_live.main")
 
+SAFE_HA_ENTITY_RE = re.compile(r"^[a-z0-9_]+\.[a-z0-9_]+$")
+SAFE_NOTIFY_RE = re.compile(r"^notify\.[a-z0-9_]+$")
+
+# Home Assistant Ingress proxy address; when running as add-on only it (and loopback) may talk to us
+INGRESS_ALLOWED_HOSTS = {"172.30.32.2", "127.0.0.1", "::1"}
+RESTRICT_TO_INGRESS = bool(os.getenv("SUPERVISOR_TOKEN")) and os.getenv("EV_ALLOW_DIRECT_ACCESS", "") != "1"
+MAX_BODY_BYTES = 128 * 1024
+
+_background_tasks: set = set()
+
+
+def _spawn_background(coro) -> None:
+    """Keeps a strong reference to fire-and-forget tasks so they are not garbage collected mid-run."""
+    task = asyncio.create_task(coro)
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -24,18 +43,47 @@ async def lifespan(app: FastAPI):
     poller.start()
     yield
     _LOGGER.info("Shutting down EV Charge Live application...")
-    poller.stop()
+    await poller.stop()
 
 
 app = FastAPI(title="EV Charge Live Monitor", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    # Ingress is same-origin; only the Capacitor APK WebView origins need CORS
+    allow_origins=["https://localhost", "http://localhost", "capacitor://localhost"],
+    allow_credentials=False,
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["Content-Type", "Authorization"],
 )
+
+
+@app.middleware("http")
+async def guard_requests(request: Request, call_next):
+    if RESTRICT_TO_INGRESS:
+        client_host = request.client.host if request.client else ""
+        if client_host not in INGRESS_ALLOWED_HOSTS:
+            _LOGGER.warning("Rejected non-ingress request from %s to %s", client_host, request.url.path)
+            return PlainTextResponse("Forbidden", status_code=403)
+    if request.method in ("POST", "PUT", "PATCH"):
+        try:
+            length = int(request.headers.get("content-length") or 0)
+        except ValueError:
+            return PlainTextResponse("Bad Request", status_code=400)
+        if length > MAX_BODY_BYTES:
+            return PlainTextResponse("Payload too large", status_code=413)
+    return await call_next(request)
+
+
+@app.middleware("http")
+async def add_security_headers(request: Request, call_next):
+    response = await call_next(request)
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    response.headers["Permissions-Policy"] = "camera=(self), geolocation=(self), bluetooth=(self)"
+    response.headers["Content-Security-Policy"] = "frame-ancestors 'self'"
+    return response
+
 
 STATIC_DIR = os.path.join(os.path.dirname(__file__), "static")
 if os.path.exists(STATIC_DIR):
@@ -65,8 +113,11 @@ async def update_config(payload: Dict[str, Any]) -> Dict[str, Any]:
     try:
         storage.save_config_override(payload)
         return {"status": "success", "config": storage.load_config()}
+    except ValueError as verr:
+        raise HTTPException(status_code=400, detail=str(verr))
     except Exception as err:
-        raise HTTPException(status_code=500, detail=str(err))
+        _LOGGER.error("Request failed: %s", err, exc_info=True)
+        raise HTTPException(status_code=500, detail="Internal error")
 
 
 @app.get("/api/device-location")
@@ -76,7 +127,8 @@ async def get_device_location() -> Dict[str, Any]:
         token = os.getenv("SUPERVISOR_TOKEN", "")
         config = storage.load_config()
         loc_cfg = config.get("location_defaults", {})
-        tracker_entity = loc_cfg.get("device_tracker_entity", "device_tracker.2407fpn8eg")
+        raw_tracker = str(loc_cfg.get("device_tracker_entity", "device_tracker.2407fpn8eg")).strip().lower()
+        tracker_entity = raw_tracker if SAFE_HA_ENTITY_RE.match(raw_tracker) else "device_tracker.2407fpn8eg"
 
         candidates = [
             tracker_entity,
@@ -88,7 +140,9 @@ async def get_device_location() -> Dict[str, Any]:
         if token:
             headers = {"Authorization": f"Bearer {token}"}
             async with httpx.AsyncClient(timeout=8.0) as client:
-                for entity in candidates:
+                for entity in dict.fromkeys(candidates):
+                    if not SAFE_HA_ENTITY_RE.match(entity):
+                        continue
                     try:
                         resp = await client.get(f"http://supervisor/core/api/states/{entity}", headers=headers)
                         if resp.status_code == 200:
@@ -134,12 +188,12 @@ async def get_device_location() -> Dict[str, Any]:
 
 @app.get("/api/stations")
 async def search_stations(
-    city: Optional[str] = Query(None),
-    postal_code: Optional[str] = Query(None),
-    lat: Optional[float] = Query(None),
-    lon: Optional[float] = Query(None),
-    radius: Optional[int] = Query(None),
-    limit: int = Query(100)
+    city: Optional[str] = Query(None, max_length=100),
+    postal_code: Optional[str] = Query(None, max_length=20),
+    lat: Optional[float] = Query(None, ge=-90.0, le=90.0),
+    lon: Optional[float] = Query(None, ge=-180.0, le=180.0),
+    radius: Optional[int] = Query(None, ge=100, le=100000),
+    limit: int = Query(100, ge=1, le=250)
 ) -> List[Dict[str, Any]]:
     """Searches for charging stations by address or geo-radius."""
     config = storage.load_config()
@@ -164,11 +218,15 @@ async def search_stations(
         limit=limit
     )
 
-    # Attach is_favorite flag
+    # Attach is_favorite and is_watched flags
     favorites = storage.load_favorites()
     fav_ids = {str(f.get("id")) for f in favorites}
+    watchlist = storage.load_watchlist()
+    watch_ids = {str(w.get("id")) for w in watchlist}
     for s in stations:
-        s["is_favorite"] = str(s.get("id")) in fav_ids
+        sid = str(s.get("id"))
+        s["is_favorite"] = sid in fav_ids
+        s["is_watched"] = sid in watch_ids
 
     return stations
 
@@ -185,10 +243,73 @@ async def toggle_favorite(station: Dict[str, Any]) -> Dict[str, Any]:
     try:
         is_fav = storage.toggle_favorite(station)
         # Run poller sync in background to update HA entity immediately
-        asyncio.create_task(poller.sync_favorites())
+        _spawn_background(poller.sync_favorites())
         return {"status": "success", "is_favorite": is_fav}
+    except ValueError as verr:
+        raise HTTPException(status_code=400, detail=str(verr))
     except Exception as err:
-        raise HTTPException(status_code=500, detail=str(err))
+        _LOGGER.error("Request failed: %s", err, exc_info=True)
+        raise HTTPException(status_code=500, detail="Internal error")
+
+
+@app.get("/api/watchlist")
+async def get_watchlist() -> List[Dict[str, Any]]:
+    """Returns the list of stations actively on the push notification watchlist."""
+    return storage.load_watchlist()
+
+
+@app.post("/api/watchlist/toggle")
+async def toggle_watchlist(station: Dict[str, Any]) -> Dict[str, Any]:
+    """Toggles watchlist status for a station."""
+    try:
+        is_watched = storage.toggle_watchlist(station)
+        return {"status": "success", "is_watched": is_watched}
+    except ValueError as verr:
+        raise HTTPException(status_code=400, detail=str(verr))
+    except Exception as err:
+        _LOGGER.error("Request failed: %s", err, exc_info=True)
+        raise HTTPException(status_code=500, detail="Internal error")
+
+
+@app.get("/api/notify-devices")
+async def get_notify_devices() -> List[Dict[str, Any]]:
+    """Discovers available mobile notification services from Home Assistant."""
+    token = os.getenv("SUPERVISOR_TOKEN", "")
+    devices: List[Dict[str, Any]] = []
+
+    known_labels = {
+        "notify.mobile_app_2407fpn8eg": "📱 Stephan (Xiaomi 14T Pro)",
+        "notify.mobile_app_sm_s928b": "📱 Galaxy S24 Ultra",
+        "notify.mobile_app_2405crpfdg": "📱 Xiaomi Handy",
+        "notify.mobile_app_sm_x115": "📟 Galaxy Tab A9",
+        "notify.notify": "📢 Alle Geräte (Broadcast Gruppe)"
+    }
+
+    if token:
+        try:
+            headers = {"Authorization": f"Bearer {token}"}
+            async with httpx.AsyncClient(timeout=6.0) as client:
+                resp = await client.get("http://supervisor/core/api/services", headers=headers)
+                if resp.status_code == 200:
+                    domains = resp.json()
+                    for d in domains:
+                        if d.get("domain") == "notify":
+                            svcs = d.get("services", {})
+                            for svc_key in svcs.keys():
+                                full_id = f"notify.{svc_key}"
+                                if svc_key.startswith("mobile_app_") or svc_key == "notify":
+                                    label = known_labels.get(
+                                        full_id,
+                                        f"📱 {svc_key.replace('mobile_app_', '').replace('_', ' ').upper()}"
+                                    )
+                                    devices.append({"id": full_id, "name": label})
+        except Exception as err:
+            _LOGGER.warning("Could not query HA notify services: %s", err)
+
+    if not devices:
+        devices = [{"id": k, "name": v} for k, v in known_labels.items()]
+
+    return devices
 
 
 @app.post("/api/test-notify")
@@ -210,14 +331,19 @@ async def trigger_sync() -> Dict[str, Any]:
 async def send_to_cupra_endpoint(payload: Dict[str, Any]) -> Dict[str, Any]:
     """Emits navigation destination event on Home Assistant eventbus and sends notification to car/phone."""
     token = os.getenv("SUPERVISOR_TOKEN", "")
-    station_name = payload.get("name") or payload.get("address") or "Ladestation"
-    lat = payload.get("latitude")
-    lon = payload.get("longitude")
-    address = payload.get("address", "")
-    operator = payload.get("operator", "")
+    station_name = str(payload.get("name") or payload.get("address") or "Ladestation")[:150]
+    raw_lat = payload.get("latitude")
+    raw_lon = payload.get("longitude")
+    address = str(payload.get("address", ""))[:200]
+    operator = str(payload.get("operator", ""))[:120]
 
-    if not lat or not lon:
-        raise HTTPException(status_code=400, detail="Missing latitude or longitude")
+    try:
+        lat = float(raw_lat)
+        lon = float(raw_lon)
+        if not (-90.0 <= lat <= 90.0 and -180.0 <= lon <= 180.0):
+            raise ValueError("Coordinates out of range")
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="Invalid or missing latitude/longitude")
 
     gmaps_url = f"https://www.google.com/maps/dir/?api=1&destination={lat},{lon}"
 
@@ -244,22 +370,26 @@ async def send_to_cupra_endpoint(payload: Dict[str, Any]) -> Dict[str, Any]:
             try:
                 config = storage.load_config()
                 notify_cfg = config.get("notifications", {})
-                service_str = notify_cfg.get("service", "notify.notify")
-                parts = service_str.split(".", 1)
-                domain = parts[0] if len(parts) > 1 else "notify"
-                service = parts[1] if len(parts) > 1 else "notify"
-                await client.post(
-                    f"http://supervisor/core/api/services/{domain}/{service}",
-                    json={
-                        "title": "🚗 Route an Cupra Born gesendet",
-                        "message": f"Ziel: {station_name} ({address})",
-                        "data": {
-                            "url": gmaps_url,
-                            "clickAction": gmaps_url
-                        }
-                    },
-                    headers=headers
-                )
+                target_devices = notify_cfg.get("target_devices")
+                if not target_devices or not isinstance(target_devices, list):
+                    single_svc = notify_cfg.get("service", "notify.mobile_app_2407fpn8eg")
+                    target_devices = [single_svc] if single_svc else ["notify.mobile_app_2407fpn8eg"]
+                for dev_str in dict.fromkeys(str(d).strip().lower() for d in target_devices):
+                    if not SAFE_NOTIFY_RE.match(dev_str):
+                        continue
+                    service = dev_str.split(".", 1)[1]
+                    await client.post(
+                        f"http://supervisor/core/api/services/notify/{service}",
+                        json={
+                            "title": "🚗 Route an Cupra Born gesendet",
+                            "message": f"Ziel: {station_name} ({address})",
+                            "data": {
+                                "url": gmaps_url,
+                                "clickAction": gmaps_url
+                            }
+                        },
+                        headers=headers
+                    )
             except Exception as err:
                 _LOGGER.warning("Could not send Cupra notification: %s", err)
 
@@ -268,3 +398,75 @@ async def send_to_cupra_endpoint(payload: Dict[str, Any]) -> Dict[str, Any]:
         "message": f"Ziel {station_name} an Cupra Born gesendet!",
         "google_maps_url": gmaps_url
     }
+
+
+@app.get("/api/geocode")
+async def geocode_location(q: str = Query(..., min_length=2, max_length=150)) -> List[Dict[str, Any]]:
+    """Geocodes an address or city query via OpenStreetMap Nominatim."""
+    url = "https://nominatim.openstreetmap.org/search"
+    headers = {"User-Agent": "EVChargeLiveApp/1.0 (HomeAssistant; CupraBorn)"}
+    params = {"q": q.strip(), "format": "json", "addressdetails": 1, "limit": 5, "countrycodes": "de,at,ch,fr,nl"}
+    async with httpx.AsyncClient(timeout=8.0) as client:
+        try:
+            resp = await client.get(url, params=params, headers=headers)
+            if resp.status_code == 200:
+                results = resp.json()
+                return [
+                    {
+                        "display_name": item.get("display_name"),
+                        "latitude": float(item.get("lat")),
+                        "longitude": float(item.get("lon")),
+                        "type": item.get("type")
+                    }
+                    for item in results
+                    if item.get("lat") is not None and item.get("lon") is not None
+                ]
+        except Exception as err:
+            _LOGGER.warning("Geocoding failed for '%s': %s", q, err)
+    return []
+
+
+@app.get("/api/route")
+async def calculate_route(
+    start_lat: float = Query(..., ge=-90.0, le=90.0),
+    start_lon: float = Query(..., ge=-180.0, le=180.0),
+    end_lat: float = Query(..., ge=-90.0, le=90.0),
+    end_lon: float = Query(..., ge=-180.0, le=180.0)
+) -> Dict[str, Any]:
+    """Calculates driving route geometry and distance via public OSRM."""
+    url = f"https://router.project-osrm.org/route/v1/driving/{start_lon},{start_lat};{end_lon},{end_lat}"
+    params = {"overview": "full", "geometries": "geojson", "steps": "false"}
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        try:
+            resp = await client.get(url, params=params)
+            if resp.status_code == 200:
+                data = resp.json()
+                routes = data.get("routes", [])
+                if routes:
+                    primary = routes[0]
+                    dist_km = primary.get("distance", 0) / 1000.0
+                    duration_min = primary.get("duration", 0) / 60.0
+                    coords = primary.get("geometry", {}).get("coordinates", [])
+                    lat_lngs = [[c[1], c[0]] for c in coords if len(c) >= 2]
+                    return {
+                        "status": "success",
+                        "distance_km": round(dist_km, 1),
+                        "duration_minutes": round(duration_min),
+                        "coordinates": lat_lngs
+                    }
+        except Exception as err:
+            _LOGGER.warning("Route calculation failed: %s", err)
+
+    # Fallback to direct calculation if OSRM is unreachable
+    dlat = math.radians(end_lat - start_lat)
+    dlon = math.radians(end_lon - start_lon)
+    a = math.sin(dlat / 2)**2 + math.cos(math.radians(start_lat)) * math.cos(math.radians(end_lat)) * math.sin(dlon / 2)**2
+    c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+    direct_km = 6371.0 * c * 1.25  # 25% road factor
+    return {
+        "status": "fallback",
+        "distance_km": round(direct_km, 1),
+        "duration_minutes": round(direct_km / 90.0 * 60),
+        "coordinates": [[start_lat, start_lon], [end_lat, end_lon]]
+    }
+

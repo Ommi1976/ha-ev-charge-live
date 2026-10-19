@@ -1,12 +1,14 @@
 import datetime
 import logging
 import os
+import re
 from typing import Any, Dict, Optional
 import httpx
 
 _LOGGER = logging.getLogger("ev_charge_live.notifier")
 
 SUPERVISOR_URL = "http://supervisor/core/api"
+SAFE_NOTIFY_RE = re.compile(r"^notify\.[a-z0-9_]+$")
 
 
 class _SafeFormatDict(dict):
@@ -37,7 +39,10 @@ class HANotifier:
             return False
 
         station_id = str(station.get("id"))
-        cooldown_min = notify_cfg.get("cooldown_minutes", 10)
+        try:
+            cooldown_min = float(notify_cfg.get("cooldown_minutes", 10))
+        except (TypeError, ValueError):
+            cooldown_min = 10.0
         now = datetime.datetime.now()
 
         # Cooldown check
@@ -56,13 +61,19 @@ class HANotifier:
         free_slots = station.get("free_slots", 1)
         total_slots = station.get("total_slots", 2)
         operator = station.get("operator", "")
-        max_power_kw = max([c.get("power_kw", 0) for c in station.get("connectors", [])] or [22.0])
+        power_values = []
+        for c in station.get("connectors") or []:
+            try:
+                power_values.append(float(c.get("power_kw", 0)))
+            except (AttributeError, TypeError, ValueError):
+                continue
+        max_power_kw = max(power_values or [22.0])
 
-        title_tpl = notify_cfg.get("title_template", "⚡ Ladestation frei: {station_name}")
-        msg_tpl = notify_cfg.get(
+        title_tpl = str(notify_cfg.get("title_template") or "⚡ Ladestation frei: {station_name}")
+        msg_tpl = str(notify_cfg.get(
             "message_template",
             "An {station_name} ({address}) sind jetzt {free_slots} von {total_slots} Plätzen ({max_power_kw} kW) frei!"
-        )
+        ))
 
         tpl_vars = _SafeFormatDict(
             station_name=station_name,
@@ -82,11 +93,6 @@ class HANotifier:
         except Exception:
             message = f"An {station_name} ({address}) sind jetzt {free_slots} von {total_slots} Plätzen frei!"
 
-        service_str = notify_cfg.get("service", "notify.notify")
-        parts = service_str.split(".", 1)
-        domain = parts[0] if len(parts) > 1 else "notify"
-        service = parts[1] if len(parts) > 1 else "notify"
-
         lat = station.get("latitude")
         lon = station.get("longitude")
         gmaps_url = f"https://www.google.com/maps/dir/?api=1&destination={lat},{lon}" if lat and lon else "/ev_charge_live"
@@ -103,8 +109,12 @@ class HANotifier:
             }
         ]
 
-        # 1. Call Notify Service in HA Core
-        success = await self._call_service(domain, service, {
+        target_devices = notify_cfg.get("target_devices")
+        if not target_devices or not isinstance(target_devices, list):
+            single_svc = notify_cfg.get("service", "notify.mobile_app_2407fpn8eg")
+            target_devices = [single_svc] if single_svc else ["notify.mobile_app_2407fpn8eg"]
+
+        notify_payload = {
             "title": title,
             "message": message,
             "data": {
@@ -113,7 +123,19 @@ class HANotifier:
                 "clickAction": gmaps_url,
                 "actions": actions
             }
-        })
+        }
+
+        # 1. Call Notify Service for each configured target device
+        success = False
+        for dev_str in dict.fromkeys(str(d).strip().lower() for d in target_devices):
+            # Only notify.* services may be called from (UI-editable) config
+            if not SAFE_NOTIFY_RE.match(dev_str):
+                _LOGGER.warning("Ignoring invalid notify target: %r", dev_str)
+                continue
+            service = dev_str.split(".", 1)[1]
+            ok = await self._call_service("notify", service, notify_payload)
+            if ok:
+                success = True
 
         # 2. Fire HA Event for custom automations
         ha_cfg = config.get("home_assistant_integration", {})

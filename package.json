@@ -1,0 +1,19 @@
+{
+  "name": "ha-ev-charge-live",
+  "version": "1.3.6",
+  "description": "Ein modernes, leichtgewichtiges Home Assistant OS Add-on zur **Echtzeit-Überwachung von E-Auto-Ladestationen** mit interaktiver Ingress-Karte, 1-Klick-Favoriten und Push-Benachrichtigungen aufs Smartphone, sobald ein Ladeplatz frei wird.",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "@capacitor-community/bluetooth-le": "^8.3.0",
+    "@capacitor/android": "^8.5.3",
+    "@capacitor/cli": "^8.5.3",
+    "@capacitor/core": "^8.5.3"
+  }
+}

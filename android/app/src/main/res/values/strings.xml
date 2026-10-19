@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">EV Charge Live</string>
+    <string name="title_activity_main">EV Charge Live</string>
+    <string name="package_name">de.stephan.evchargelive</string>
+    <string name="custom_url_scheme">de.stephan.evchargelive</string>
+</resources>

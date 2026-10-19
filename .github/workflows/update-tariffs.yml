@@ -1,0 +1,40 @@
+name: Autonomer EV-Tarif-Sync (Cloud)
+
+on:
+  schedule:
+    # Jeden Montag um 03:00 Uhr UTC (05:00 Uhr MESZ)
+    - cron: '0 3 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  sync-and-update:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Run Autonomous Tariff Scraper & Validator
+        run: node scripts/update-tariffs.js
+
+      - name: Commit & Push Changes (if updated)
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          if ! git diff --quiet tariffs.json; then
+            echo "Änderungen an tariffs.json erkannt. Committe neue Tarife..."
+            git add tariffs.json
+            git commit -m "chore(tariffs): bundesweites Tarif-Update $(date +'%d.%m.%Y') [skip ci]"
+            git push origin HEAD
+          else
+            echo "Keine Tarifänderungen vorhanden. Repository ist auf dem neuesten Stand."
+          fi

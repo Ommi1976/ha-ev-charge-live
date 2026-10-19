@@ -1,0 +1,22 @@
+{
+  "appId": "de.stephan.evchargelive",
+  "appName": "EV Charge Live",
+  "webDir": "www",
+  "server": {
+    "androidScheme": "https",
+    "cleartext": true
+  },
+  "plugins": {
+    "CapacitorHttp": {
+      "enabled": true
+    },
+    "BluetoothLe": {
+      "displayStrings": {
+        "scanning": "Suche nach vLinker FS & OBD2...",
+        "cancel": "Abbrechen",
+        "availableDevices": "Verfügbare Bluetooth-Geräte",
+        "noDeviceFound": "Kein OBD2-Dongle gefunden"
+      }
+    }
+  }
+}

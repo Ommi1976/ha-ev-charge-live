@@ -1,9 +1,137 @@
 import json
 import logging
+import math
 import os
-from typing import Any, Dict, List
+import re
+import threading
+from typing import Any, Dict, List, Optional
 
 _LOGGER = logging.getLogger("ev_charge_live.storage")
+
+SAFE_ENTITY_RE = re.compile(r"^[a-z0-9_]+\.[a-z0-9_]+$")
+SAFE_NOTIFY_RE = re.compile(r"^notify\.[a-z0-9_]+$")
+SAFE_PREFIX_RE = re.compile(r"^[a-z_]+\.[a-z0-9_]*$")
+
+MAX_CONFIG_BYTES = 64 * 1024
+MAX_STATION_BYTES = 32 * 1024
+MAX_STATION_LIST = 100
+MAX_TARGET_DEVICES = 20
+MAX_TEMPLATE_LEN = 500
+
+# Keys that only the client (APK/browser) needs; never persisted server-side
+CLIENT_ONLY_SECRET_KEYS = ("ha_token",)
+
+STATION_KEYS = (
+    "id", "name", "operator", "address", "postal_code", "city", "latitude", "longitude",
+    "distance_km", "total_slots", "free_slots", "occupied_slots", "out_of_order_slots",
+    "status", "status_text", "connectors", "live_source", "last_updated", "enbw_station_id",
+)
+
+
+def _clamp_int(value: Any, lo: int, hi: int, default: int) -> int:
+    try:
+        num = int(float(value))
+    except (TypeError, ValueError, OverflowError):
+        return default
+    return max(lo, min(hi, num))
+
+
+def _safe_float(value: Any, lo: float, hi: float) -> Optional[float]:
+    try:
+        num = float(value)
+    except (TypeError, ValueError):
+        return None
+    if math.isnan(num) or num < lo or num > hi:
+        return None
+    return num
+
+
+def sanitize_station(station: Any) -> Dict[str, Any]:
+    """Reduces an untrusted station payload to known keys and bounded size."""
+    if not isinstance(station, dict) or station.get("id") in (None, ""):
+        raise ValueError("Invalid station payload: missing 'id'")
+    station_id = str(station.get("id")).strip()
+    if not station_id or len(station_id) > 128:
+        raise ValueError("Invalid station payload: bad 'id'")
+    clean = {k: station[k] for k in STATION_KEYS if k in station}
+    clean["id"] = station_id
+    for key in ("name", "operator", "address", "postal_code", "city", "status", "status_text", "live_source"):
+        if key in clean and clean[key] is not None:
+            clean[key] = str(clean[key])[:200]
+    if not isinstance(clean.get("connectors", []), list):
+        clean["connectors"] = []
+    elif "connectors" in clean:
+        clean["connectors"] = [c for c in clean["connectors"][:50] if isinstance(c, dict)]
+    if len(json.dumps(clean, ensure_ascii=False)) > MAX_STATION_BYTES:
+        raise ValueError("Station payload too large")
+    return clean
+
+
+def sanitize_config(cfg: Dict[str, Any]) -> Dict[str, Any]:
+    """Validates/clamps known config fields in-place so bad UI/options values can't break the add-on."""
+    for key in CLIENT_ONLY_SECRET_KEYS:
+        cfg.pop(key, None)
+
+    polling = cfg.get("polling")
+    if isinstance(polling, dict):
+        if "interval_seconds" in polling:
+            polling["interval_seconds"] = _clamp_int(polling["interval_seconds"], 15, 600, 60)
+        if "request_timeout" in polling:
+            polling["request_timeout"] = _clamp_int(polling["request_timeout"], 5, 60, 15)
+
+    loc = cfg.get("location_defaults")
+    if isinstance(loc, dict):
+        for key, lo, hi in (("latitude", -90.0, 90.0), ("longitude", -180.0, 180.0)):
+            if key in loc and _safe_float(loc[key], lo, hi) is None:
+                loc.pop(key)
+        if "search_radius_meters" in loc:
+            loc["search_radius_meters"] = _clamp_int(loc["search_radius_meters"], 500, 50000, 5000)
+        if "device_tracker_entity" in loc:
+            tracker = str(loc.get("device_tracker_entity") or "").strip().lower()
+            if tracker and not SAFE_ENTITY_RE.match(tracker):
+                loc.pop("device_tracker_entity")
+            else:
+                loc["device_tracker_entity"] = tracker
+
+    notify = cfg.get("notifications")
+    if isinstance(notify, dict):
+        if "target_devices" in notify:
+            devices = notify.get("target_devices")
+            if isinstance(devices, list):
+                cleaned = []
+                for dev in devices[:MAX_TARGET_DEVICES]:
+                    dev_str = str(dev).strip().lower()
+                    if SAFE_NOTIFY_RE.match(dev_str) and dev_str not in cleaned:
+                        cleaned.append(dev_str)
+                notify["target_devices"] = cleaned
+            else:
+                notify.pop("target_devices")
+        if "service" in notify:
+            svc = str(notify.get("service") or "").strip().lower()
+            if SAFE_NOTIFY_RE.match(svc):
+                notify["service"] = svc
+            else:
+                notify.pop("service")
+        if "cooldown_minutes" in notify:
+            notify["cooldown_minutes"] = _clamp_int(notify["cooldown_minutes"], 1, 120, 10)
+        if "min_free_slots_to_trigger" in notify:
+            notify["min_free_slots_to_trigger"] = _clamp_int(notify["min_free_slots_to_trigger"], 1, 10, 1)
+        for key in ("title_template", "message_template"):
+            if key in notify:
+                if isinstance(notify[key], str) and notify[key].strip():
+                    notify[key] = notify[key][:MAX_TEMPLATE_LEN]
+                else:
+                    notify.pop(key)
+
+    ha_cfg = cfg.get("home_assistant_integration")
+    if isinstance(ha_cfg, dict) and "entity_prefix" in ha_cfg:
+        prefix = str(ha_cfg.get("entity_prefix") or "").strip().lower()
+        if SAFE_PREFIX_RE.match(prefix) and len(prefix) <= 64:
+            ha_cfg["entity_prefix"] = prefix
+        else:
+            ha_cfg.pop("entity_prefix")
+
+    return cfg
 
 DEFAULT_OPTIONS: Dict[str, Any] = {
     "polling": {
@@ -20,7 +148,8 @@ DEFAULT_OPTIONS: Dict[str, Any] = {
     },
     "notifications": {
         "enabled": True,
-        "service": "notify.notify",
+        "service": "notify.mobile_app_2407fpn8eg",
+        "target_devices": ["notify.mobile_app_2407fpn8eg"],
         "cooldown_minutes": 10,
         "min_free_slots_to_trigger": 1,
         "notify_on_all_busy": False,
@@ -43,45 +172,67 @@ DATA_DIR = os.getenv("DATA_DIR", "/data")
 OPTIONS_FILE = os.path.join(DATA_DIR, "options.json")
 CONFIG_OVERRIDE_FILE = os.path.join(DATA_DIR, "config_override.json")
 FAVORITES_FILE = os.path.join(DATA_DIR, "favorites.json")
+WATCHLIST_FILE = os.path.join(DATA_DIR, "watchlist.json")
 
 
 class StorageManager:
     def __init__(self) -> None:
+        self._lock = threading.RLock()
         os.makedirs(DATA_DIR, exist_ok=True)
 
     def load_config(self) -> Dict[str, Any]:
         """Loads configuration merging defaults, options.json from HA and user overrides."""
-        config = json.loads(json.dumps(DEFAULT_OPTIONS))
+        with self._lock:
+            config = json.loads(json.dumps(DEFAULT_OPTIONS))
 
-        # Merge HA options.json if present
-        if os.path.exists(OPTIONS_FILE):
-            try:
-                with open(OPTIONS_FILE, "r", encoding="utf-8") as f:
-                    ha_opts = json.load(f)
-                    self._deep_merge(config, ha_opts)
-            except Exception as err:
-                _LOGGER.warning("Could not read %s: %s", OPTIONS_FILE, err)
+            # Merge HA options.json if present
+            if os.path.exists(OPTIONS_FILE):
+                try:
+                    with open(OPTIONS_FILE, "r", encoding="utf-8") as f:
+                        ha_opts = json.load(f)
+                        if isinstance(ha_opts, dict):
+                            self._deep_merge(config, ha_opts)
+                except Exception as err:
+                    _LOGGER.warning("Could not read %s: %s", OPTIONS_FILE, err)
 
-        # Merge UI config override if present
-        if os.path.exists(CONFIG_OVERRIDE_FILE):
-            try:
-                with open(CONFIG_OVERRIDE_FILE, "r", encoding="utf-8") as f:
-                    ui_opts = json.load(f)
-                    self._deep_merge(config, ui_opts)
-            except Exception as err:
-                _LOGGER.warning("Could not read %s: %s", CONFIG_OVERRIDE_FILE, err)
+            # Merge UI config override if present
+            if os.path.exists(CONFIG_OVERRIDE_FILE):
+                try:
+                    with open(CONFIG_OVERRIDE_FILE, "r", encoding="utf-8") as f:
+                        ui_opts = json.load(f)
+                        if isinstance(ui_opts, dict):
+                            self._deep_merge(config, ui_opts)
+                except Exception as err:
+                    _LOGGER.warning("Could not read %s: %s", CONFIG_OVERRIDE_FILE, err)
 
-        return config
+            # Clamp/drop invalid values, then refill dropped keys from defaults
+            sanitize_config(config)
+            defaults = json.loads(json.dumps(DEFAULT_OPTIONS))
+            self._fill_missing(config, defaults)
+            return config
 
     def _atomic_write_json(self, path: str, data: Any) -> None:
-        """Atomically writes JSON to disk via temporary file and os.replace."""
-        tmp_path = f"{path}.tmp"
-        with open(tmp_path, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2, ensure_ascii=False)
-        os.replace(tmp_path, path)
+        """Atomically writes JSON to disk via thread-locked temporary file and os.replace."""
+        with self._lock:
+            tmp_path = f"{path}.{os.getpid()}.{threading.get_ident()}.tmp"
+            try:
+                with open(tmp_path, "w", encoding="utf-8") as f:
+                    json.dump(data, f, indent=2, ensure_ascii=False)
+                os.replace(tmp_path, path)
+            finally:
+                if os.path.exists(tmp_path):
+                    try:
+                        os.remove(tmp_path)
+                    except OSError:
+                        pass
 
     def save_config_override(self, new_config: Dict[str, Any]) -> None:
         """Saves configuration overrides from the Web UI atomically."""
+        if not isinstance(new_config, dict):
+            raise ValueError("Configuration payload must be a JSON object")
+        if len(json.dumps(new_config, ensure_ascii=False)) > MAX_CONFIG_BYTES:
+            raise ValueError("Configuration payload too large")
+        new_config = sanitize_config(json.loads(json.dumps(new_config)))
         try:
             self._atomic_write_json(CONFIG_OVERRIDE_FILE, new_config)
             _LOGGER.info("Config override saved successfully.")
@@ -91,15 +242,16 @@ class StorageManager:
 
     def load_favorites(self) -> List[Dict[str, Any]]:
         """Loads list of monitored favorite charging stations."""
-        if not os.path.exists(FAVORITES_FILE):
-            return []
-        try:
-            with open(FAVORITES_FILE, "r", encoding="utf-8") as f:
-                data = json.load(f)
-                return data if isinstance(data, list) else []
-        except Exception as err:
-            _LOGGER.warning("Failed to load favorites: %s", err)
-            return []
+        with self._lock:
+            if not os.path.exists(FAVORITES_FILE):
+                return []
+            try:
+                with open(FAVORITES_FILE, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    return data if isinstance(data, list) else []
+            except Exception as err:
+                _LOGGER.warning("Failed to load favorites: %s", err)
+                return []
 
     def save_favorites(self, favorites: List[Dict[str, Any]]) -> None:
         """Saves list of monitored favorite charging stations atomically."""
@@ -114,11 +266,12 @@ class StorageManager:
         """Updates existing favorites with fresh live data without overwriting concurrent toggle actions."""
         if not live_map:
             return
-        current_favs = self.load_favorites()
-        if not current_favs:
-            return
-        merged = [live_map.get(str(f.get("id")), f) for f in current_favs]
-        self.save_favorites(merged)
+        with self._lock:
+            current_favs = self.load_favorites()
+            if not current_favs:
+                return
+            merged = [live_map.get(str(f.get("id")), f) for f in current_favs]
+            self.save_favorites(merged)
 
     def is_favorite(self, station_id: str) -> bool:
         favs = self.load_favorites()
@@ -126,17 +279,86 @@ class StorageManager:
 
     def toggle_favorite(self, station_data: Dict[str, Any]) -> bool:
         """Toggles favorite status. Returns True if added, False if removed."""
-        favs = self.load_favorites()
-        station_id = str(station_data.get("id"))
-        existing = next((f for f in favs if str(f.get("id")) == station_id), None)
-        if existing:
-            favs = [f for f in favs if str(f.get("id")) != station_id]
-            self.save_favorites(favs)
-            return False
-        else:
-            favs.append(station_data)
-            self.save_favorites(favs)
-            return True
+        station_data = sanitize_station(station_data)
+        with self._lock:
+            favs = self.load_favorites()
+            station_id = str(station_data.get("id"))
+            existing = next((f for f in favs if str(f.get("id")) == station_id), None)
+            if existing:
+                favs = [f for f in favs if str(f.get("id")) != station_id]
+                self.save_favorites(favs)
+                return False
+            else:
+                if len(favs) >= MAX_STATION_LIST:
+                    raise ValueError(f"Maximal {MAX_STATION_LIST} Favoriten erlaubt")
+                favs.append(station_data)
+                self.save_favorites(favs)
+                return True
+
+    def load_watchlist(self) -> List[Dict[str, Any]]:
+        """Loads list of stations explicitly placed on the push notification watchlist."""
+        with self._lock:
+            if not os.path.exists(WATCHLIST_FILE):
+                return []
+            try:
+                with open(WATCHLIST_FILE, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    return data if isinstance(data, list) else []
+            except Exception as err:
+                _LOGGER.warning("Failed to load watchlist: %s", err)
+                return []
+
+    def save_watchlist(self, watchlist: List[Dict[str, Any]]) -> None:
+        """Saves list of watchlist stations atomically."""
+        try:
+            self._atomic_write_json(WATCHLIST_FILE, watchlist)
+            _LOGGER.info("Saved %d stations to watchlist (%s)", len(watchlist), WATCHLIST_FILE)
+        except Exception as err:
+            _LOGGER.error("Failed to save watchlist: %s", err)
+            raise
+
+    def is_on_watchlist(self, station_id: str) -> bool:
+        """Checks if a station is on the push notification watchlist."""
+        wl = self.load_watchlist()
+        return any(str(item.get("id")) == str(station_id) for item in wl)
+
+    def toggle_watchlist(self, station_data: Dict[str, Any]) -> bool:
+        """Toggles watchlist status. Returns True if added, False if removed."""
+        station_data = sanitize_station(station_data)
+        with self._lock:
+            wl = self.load_watchlist()
+            station_id = str(station_data.get("id"))
+            existing = next((item for item in wl if str(item.get("id")) == station_id), None)
+            if existing:
+                wl = [item for item in wl if str(item.get("id")) != station_id]
+                self.save_watchlist(wl)
+                return False
+            else:
+                if len(wl) >= MAX_STATION_LIST:
+                    raise ValueError(f"Maximal {MAX_STATION_LIST} Stationen auf der Watchlist erlaubt")
+                wl.append(station_data)
+                self.save_watchlist(wl)
+                return True
+
+    def update_watchlist_live(self, live_map: Dict[str, Dict[str, Any]]) -> None:
+        """Updates watchlist items with fresh live data."""
+        if not live_map:
+            return
+        with self._lock:
+            current_wl = self.load_watchlist()
+            if not current_wl:
+                return
+            merged = [live_map.get(str(item.get("id")), item) for item in current_wl]
+            self.save_watchlist(merged)
+
+    def _fill_missing(self, base: Dict[str, Any], defaults: Dict[str, Any]) -> None:
+        for k, v in defaults.items():
+            if k not in base:
+                base[k] = v
+            elif isinstance(v, dict) and isinstance(base[k], dict):
+                self._fill_missing(base[k], v)
+            elif isinstance(v, dict):
+                base[k] = v
 
     def _deep_merge(self, base: Dict[str, Any], update: Dict[str, Any]) -> None:
         for k, v in update.items():

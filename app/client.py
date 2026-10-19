@@ -5,14 +5,16 @@ import math
 import re
 import time
 from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import quote
 from zoneinfo import ZoneInfo
 import httpx
+
+_LOGGER = logging.getLogger("ev_charge_live.client")
 
 try:
     BERLIN_TZ = ZoneInfo("Europe/Berlin")
 except Exception:
-    import datetime
-    BERLIN_TZ = datetime.timezone(datetime.timedelta(hours=2))
+    BERLIN_TZ = datetime.timezone(datetime.timedelta(hours=1), name="CET")
 
 MOBIDATA_BASE_URL = "https://api.mobidata-bw.de/ocpdb/api/public/v1"
 ENBW_BASE_URL = "https://api.emp.emob-enbw.com/emobility-public-api/api/v1"
@@ -82,9 +84,10 @@ class EVChargeClient:
             "Accept": "application/json"
         }
         self._enbw_cache: Dict[str, Any] = {}
-        self._enbw_cache_time: float = 0.0
+        self._enbw_cache_time: Dict[str, float] = {}
         self._enbw_detail_cache: Dict[int, Any] = {}
         self._enbw_detail_time: Dict[int, float] = {}
+        self._last_known_live_stations: Dict[str, Tuple[Dict[str, Any], float]] = {}
 
     async def get_stations(
         self,
@@ -117,8 +120,13 @@ class EVChargeClient:
                 raw_items = data.get("items", data.get("data", []))
 
                 stations = []
-                for item in raw_items:
-                    parsed = self._parse_station(item, ref_lat=lat, ref_lon=lon)
+                for item in raw_items if isinstance(raw_items, list) else []:
+                    try:
+                        parsed = self._parse_station(item, ref_lat=lat, ref_lon=lon)
+                    except Exception as parse_err:
+                        # One malformed upstream record must not drop the whole result list
+                        _LOGGER.debug("Skipping malformed station record: %s", parse_err)
+                        continue
                     if parsed:
                         stations.append(parsed)
 
@@ -141,7 +149,7 @@ class EVChargeClient:
     async def get_station_by_id(self, station_id: str) -> Optional[Dict[str, Any]]:
         """Fetches detailed real-time information for a specific station with EnBW live overlay."""
         if str(station_id).startswith("enbw_"):
-            sid = str(station_id).replace("enbw_", "")
+            sid = quote(str(station_id).replace("enbw_", ""), safe="")
             try:
                 async with httpx.AsyncClient(timeout=self.timeout) as http_client:
                     det_url = f"{ENBW_BASE_URL}/chargestations/{sid}"
@@ -154,7 +162,8 @@ class EVChargeClient:
                 _LOGGER.error("Failed to fetch standalone EnBW station %s: %s", station_id, err)
                 return None
 
-        url = f"{MOBIDATA_BASE_URL}/locations/{station_id}"
+        safe_station_id = quote(str(station_id), safe="")
+        url = f"{MOBIDATA_BASE_URL}/locations/{safe_station_id}"
         try:
             async with httpx.AsyncClient(timeout=self.timeout) as http_client:
                 resp = await http_client.get(url, headers=self._headers)
@@ -164,10 +173,32 @@ class EVChargeClient:
                 item = resp.json()
                 station = self._parse_station(item)
                 if station:
-                    await self._apply_enbw_overlay_single(station, http_client)
+                    overlay_ok = await self._apply_enbw_overlay_single(station, http_client)
+                    if overlay_ok:
+                        self._last_known_live_stations[str(station_id)] = (dict(station), time.time())
+                    else:
+                        # Grace period: if EnBW overlay temporarily fails or throttles, retain last known live state for up to 300s
+                        cached_entry = self._last_known_live_stations.get(str(station_id))
+                        if cached_entry:
+                            cached_station, cached_time = cached_entry
+                            if (time.time() - cached_time) < 300.0:
+                                _LOGGER.debug(
+                                    "Retaining last known live state for %s (age %.0fs)",
+                                    station.get("name"), time.time() - cached_time
+                                )
+                                station["free_slots"] = cached_station["free_slots"]
+                                station["occupied_slots"] = cached_station["occupied_slots"]
+                                station["total_slots"] = cached_station["total_slots"]
+                                station["status"] = cached_station["status"]
+                                station["status_text"] = cached_station["status_text"]
+                                station["connectors"] = cached_station.get("connectors", station.get("connectors", []))
+                                station["live_source"] = "EnBW Echtzeit (Puffer)"
                 return station
         except Exception as err:
             _LOGGER.error("Failed to fetch station %s: %s", station_id, err)
+            cached_entry = self._last_known_live_stations.get(str(station_id))
+            if cached_entry and (time.time() - cached_entry[1]) < 300.0:
+                return cached_entry[0]
             return None
 
     def _build_standalone_enbw_station(
@@ -184,6 +215,10 @@ class EVChargeClient:
         lon = det.get("lon") or m.get("lon")
         if not sid or lat is None or lon is None:
             return None
+        try:
+            lat, lon = float(lat), float(lon)
+        except (TypeError, ValueError):
+            return None
 
         raw_addr = det.get("shortAddress") or m.get("shortAddress") or ""
         parts = [p.strip() for p in raw_addr.split(",")]
@@ -197,10 +232,14 @@ class EVChargeClient:
         if "STADTWERKE HOCKENHEIM" in op_name.upper():
             op_name = "Stadtwerke Hockenheim"
 
-        total = det.get("numberOfChargePoints") or m.get("numberOfChargePoints") or 1
-        free = det.get("availableChargePoints")
-        if free is None:
-            free = m.get("availableChargePoints", 0)
+        try:
+            total = max(1, int(det.get("numberOfChargePoints") or m.get("numberOfChargePoints") or 1))
+            free = det.get("availableChargePoints")
+            if free is None:
+                free = m.get("availableChargePoints", 0)
+            free = max(0, min(total, int(free or 0)))
+        except (TypeError, ValueError):
+            return None
         occupied = max(0, total - free)
 
         connectors = self._parse_enbw_charge_points(det.get("chargePoints", []))
@@ -298,7 +337,7 @@ class EVChargeClient:
                 free_slots += 1
 
             for conn in evse.get("connectors", []):
-                standard = conn.get("standard", "Typ 2")
+                standard = str(conn.get("standard") or "Typ 2")
                 if "T2_COMBO" in standard or "CCS" in standard:
                     standard_clean = "CCS"
                 elif "T2" in standard:
@@ -310,7 +349,10 @@ class EVChargeClient:
                 else:
                     standard_clean = standard
 
-                power_w = conn.get("max_electric_power") or 0
+                try:
+                    power_w = float(conn.get("max_electric_power") or 0)
+                except (TypeError, ValueError):
+                    power_w = 0.0
                 power_kw = round(power_w / 1000.0, 1) if power_w > 0 else 22.0
                 connectors_info.append({
                     "standard": standard_clean,
@@ -448,16 +490,17 @@ class EVChargeClient:
 
         if len(self._enbw_cache) > 100:
             self._enbw_cache.clear()
+            self._enbw_cache_time.clear()
         if len(self._enbw_detail_cache) > 250:
             self._enbw_detail_cache.clear()
             self._enbw_detail_time.clear()
 
-        if cache_key in self._enbw_cache and (now - self._enbw_cache_time) < 25.0:
+        if cache_key in self._enbw_cache and (now - self._enbw_cache_time.get(cache_key, 0.0)) < 25.0:
             enbw_markers = self._enbw_cache[cache_key]
         else:
             enbw_markers = await self._fetch_enbw_area(min_lat, max_lat, min_lon, max_lon, http_client)
             self._enbw_cache[cache_key] = enbw_markers
-            self._enbw_cache_time = now
+            self._enbw_cache_time[cache_key] = now
 
         if not enbw_markers:
             return
@@ -503,7 +546,7 @@ class EVChargeClient:
             if not sid or sid in matched_sids:
                 continue
             m_lat, m_lon = m.get("lat"), m.get("lon")
-            if not m_lat or not m_lon:
+            if not isinstance(m_lat, (int, float)) or not isinstance(m_lon, (int, float)):
                 continue
             m_addr_norm = normalize_address(m.get("shortAddress", ""))
             already_covered = False
@@ -572,32 +615,68 @@ class EVChargeClient:
         self,
         station: Dict[str, Any],
         http_client: httpx.AsyncClient
-    ) -> None:
+    ) -> bool:
         """Applies detailed real-time availability from EnBW for a single station."""
         lat = station.get("latitude")
         lon = station.get("longitude")
         if not lat or not lon:
-            return
+            return False
 
-        # Check tight bounding box
-        delta = 0.004
-        markers = await self._fetch_enbw_area(lat - delta, lat + delta, lon - delta, lon + delta, http_client)
+        # Check tight bounding box with caching
+        delta = 0.005
+        cache_key = f"{round(lat - delta, 3)}_{round(lat + delta, 3)}_{round(lon - delta, 3)}_{round(lon + delta, 3)}"
+        now = time.time()
+        if cache_key in self._enbw_cache and (now - self._enbw_cache_time.get(cache_key, 0.0)) < 25.0:
+            markers = self._enbw_cache[cache_key]
+        else:
+            markers = await self._fetch_enbw_area(lat - delta, lat + delta, lon - delta, lon + delta, http_client)
+            if markers:
+                self._enbw_cache[cache_key] = markers
+                self._enbw_cache_time[cache_key] = now
+
         matched_enbw = self._overlay_single_marker(station, markers)
+        if not matched_enbw:
+            return False
 
         # If matched and stationId available, get individual connector statuses
-        if matched_enbw and matched_enbw.get("stationId"):
+        if matched_enbw.get("stationId"):
+            sid = matched_enbw["stationId"]
             try:
-                sid = matched_enbw["stationId"]
-                det_url = f"{ENBW_BASE_URL}/chargestations/{sid}"
-                resp = await http_client.get(det_url, headers=ENBW_HEADERS, timeout=6.0)
-                if resp.status_code == 200:
-                    det = resp.json()
+                det = None
+                if sid in self._enbw_detail_cache and (now - self._enbw_detail_time.get(sid, 0.0)) < 30.0:
+                    det = self._enbw_detail_cache[sid]
+                else:
+                    det_url = f"{ENBW_BASE_URL}/chargestations/{sid}"
+                    resp = await http_client.get(det_url, headers=ENBW_HEADERS, timeout=6.0)
+                    if resp.status_code == 200:
+                        det = resp.json()
+                        self._enbw_detail_cache[sid] = det
+                        self._enbw_detail_time[sid] = now
+
+                if det:
                     charge_points = det.get("chargePoints", [])
                     connectors = self._parse_enbw_charge_points(charge_points)
                     if connectors:
                         station["connectors"] = connectors
+                        conn_free = sum(1 for c in connectors if c.get("status") in ("AVAILABLE", "FREE"))
+                        conn_occupied = sum(1 for c in connectors if c.get("status") in ("OCCUPIED", "CHARGING"))
+                        conn_total = len(connectors)
+                        if conn_total > 0:
+                            station["total_slots"] = conn_total
+                            station["free_slots"] = conn_free
+                            station["occupied_slots"] = conn_occupied
+                            if conn_free == conn_total:
+                                station["status"] = "AVAILABLE"
+                                station["status_text"] = "Frei"
+                            elif conn_free == 0:
+                                station["status"] = "OCCUPIED"
+                                station["status_text"] = "Vollständig belegt"
+                            else:
+                                station["status"] = "PARTIAL"
+                                station["status_text"] = f"Teilweise belegt ({conn_free}/{conn_total} frei)"
             except Exception as err:
                 _LOGGER.debug("Could not fetch EnBW detail for station %s: %s", matched_enbw.get("stationId"), err)
+        return True
 
     def _overlay_single_marker(
         self,
@@ -616,7 +695,7 @@ class EVChargeClient:
         for m in enbw_markers:
             m_lat = m.get("lat")
             m_lon = m.get("lon")
-            if not m_lat or not m_lon:
+            if not isinstance(m_lat, (int, float)) or not isinstance(m_lon, (int, float)):
                 continue
 
             dist = calculate_distance_m(st_lat, st_lon, m_lat, m_lon)
@@ -631,15 +710,19 @@ class EVChargeClient:
             if is_addr_match and dist < min_addr_dist:
                 min_addr_dist = dist
                 best_addr_match = m
-            elif dist < 120.0 and dist < min_dist:
+            elif dist < 50.0 and dist < min_dist:
                 min_dist = dist
                 best_dist_match = m
 
         best_match = best_addr_match or best_dist_match
 
         if best_match:
-            total = best_match.get("numberOfChargePoints") or station.get("total_slots", 2)
-            free = best_match.get("availableChargePoints")
+            try:
+                total = int(best_match.get("numberOfChargePoints") or station.get("total_slots", 2))
+                free = best_match.get("availableChargePoints")
+                free = None if free is None else max(0, min(total, int(free)))
+            except (TypeError, ValueError):
+                free = None
             if free is not None:
                 occupied = max(0, total - free)
                 station["total_slots"] = total
