@@ -1,9 +1,6 @@
 # Dependencies
 node_modules/
 
-# Build artifacts (APKs are attached to releases, not versioned)
-*.apk
-
 # Python
 __pycache__/
 *.pyc
