@@ -1,112 +1,262 @@
 {
-  "version": "1.3.3",
-  "last_updated": "2026-10-18T11:27:00Z",
-  "tariffs_updated_readable": "18.10.2026",
+  "version": "1.3.8",
+  "last_updated": "2026-10-20T18:10:00.000Z",
+  "tariffs_updated_readable": "20.10.2026",
   "description": "Zentraler, bundesweiter Ladetarifkatalog für EV Charge Live (CPO-Adhoc und EMP-Roaming)",
   "cpo_tariffs": {
     "stadtwerke_hockenheim": {
-      "keywords": ["stadtwerke", "hockenheim", "swh"],
+      "keywords": [
+        "stadtwerke",
+        "hockenheim",
+        "swh"
+      ],
       "name": "Stadtwerke Hockenheim / Ladenetz",
-      "adhoc": { "ac": 0.52, "dc": 0.52, "hpc": 0.52, "start_fee": 1.00 },
+      "adhoc": {
+        "ac": 0.52,
+        "dc": 0.52,
+        "hpc": 0.52,
+        "start_fee": 1
+      },
       "app_name": "ladeapp / QR-Code Direkt"
     },
     "enbw": {
-      "keywords": ["enbw"],
+      "keywords": [
+        "enbw"
+      ],
       "name": "EnBW HyperNetz",
-      "adhoc": { "ac": 0.59, "dc": 0.69, "hpc": 0.69, "start_fee": 0.00 }
+      "adhoc": {
+        "ac": 0.59,
+        "dc": 0.69,
+        "hpc": 0.69,
+        "start_fee": 0
+      }
     },
     "aral_pulse": {
-      "keywords": ["aral", "pulse"],
+      "keywords": [
+        "aral",
+        "pulse"
+      ],
       "name": "Aral pulse",
-      "adhoc": { "ac": 0.59, "dc": 0.69, "hpc": 0.79, "start_fee": 0.00 }
+      "adhoc": {
+        "ac": 0.59,
+        "dc": 0.69,
+        "hpc": 0.79,
+        "start_fee": 0
+      }
     },
     "ionity": {
-      "keywords": ["ionity"],
+      "keywords": [
+        "ionity"
+      ],
       "name": "IONITY",
-      "adhoc": { "ac": 0.69, "dc": 0.69, "hpc": 0.69, "start_fee": 0.00 }
+      "adhoc": {
+        "ac": 0.69,
+        "dc": 0.69,
+        "hpc": 0.69,
+        "start_fee": 0
+      }
     },
     "fastned": {
-      "keywords": ["fastned"],
+      "keywords": [
+        "fastned"
+      ],
       "name": "Fastned",
-      "adhoc": { "ac": 0.59, "dc": 0.69, "hpc": 0.69, "start_fee": 0.00 }
+      "adhoc": {
+        "ac": 0.59,
+        "dc": 0.69,
+        "hpc": 0.69,
+        "start_fee": 0
+      }
     },
     "allego": {
-      "keywords": ["allego"],
+      "keywords": [
+        "allego"
+      ],
       "name": "Allego",
-      "adhoc": { "ac": 0.60, "dc": 0.69, "hpc": 0.73, "start_fee": 0.00 }
+      "adhoc": {
+        "ac": 0.6,
+        "dc": 0.69,
+        "hpc": 0.73,
+        "start_fee": 0
+      }
     },
     "ewe_go": {
-      "keywords": ["ewe", "ewe go"],
+      "keywords": [
+        "ewe",
+        "ewe go"
+      ],
       "name": "EWE Go",
-      "adhoc": { "ac": 0.52, "dc": 0.52, "hpc": 0.52, "start_fee": 0.00 }
+      "adhoc": {
+        "ac": 0.52,
+        "dc": 0.52,
+        "hpc": 0.52,
+        "start_fee": 0
+      }
     },
     "pfalzwerke": {
-      "keywords": ["pfalzwerke"],
+      "keywords": [
+        "pfalzwerke"
+      ],
       "name": "Pfalzwerke",
-      "adhoc": { "ac": 0.54, "dc": 0.64, "hpc": 0.64, "start_fee": 0.00 }
+      "adhoc": {
+        "ac": 0.54,
+        "dc": 0.64,
+        "hpc": 0.64,
+        "start_fee": 0
+      }
     },
     "tesla": {
-      "keywords": ["tesla", "supercharger"],
+      "keywords": [
+        "tesla",
+        "supercharger"
+      ],
       "name": "Tesla Supercharger",
-      "adhoc": { "ac": 0.50, "dc": 0.50, "hpc": 0.52, "start_fee": 0.00 }
+      "adhoc": {
+        "ac": 0.5,
+        "dc": 0.5,
+        "hpc": 0.52,
+        "start_fee": 0
+      }
     },
     "shell_recharge": {
-      "keywords": ["shell", "recharge"],
+      "keywords": [
+        "shell",
+        "recharge"
+      ],
       "name": "Shell Recharge",
-      "adhoc": { "ac": 0.59, "dc": 0.69, "hpc": 0.79, "start_fee": 0.00 }
+      "adhoc": {
+        "ac": 0.59,
+        "dc": 0.69,
+        "hpc": 0.79,
+        "start_fee": 0
+      }
     },
     "eon": {
-      "keywords": ["e.on", "eon"],
+      "keywords": [
+        "e.on",
+        "eon"
+      ],
       "name": "E.ON Drive",
-      "adhoc": { "ac": 0.59, "dc": 0.69, "hpc": 0.69, "start_fee": 0.00 }
+      "adhoc": {
+        "ac": 0.59,
+        "dc": 0.69,
+        "hpc": 0.69,
+        "start_fee": 0
+      }
     },
     "default": {
       "name": "Betreiber-Ad-hoc (Säulentarif)",
-      "adhoc": { "ac": 0.55, "dc": 0.65, "hpc": 0.72, "start_fee": 0.00 }
+      "adhoc": {
+        "ac": 0.55,
+        "dc": 0.65,
+        "hpc": 0.72,
+        "start_fee": 0
+      }
     }
   },
   "emp_tariffs": {
     "enbw_m": {
       "name": "EnBW mobility+ (Tarif M/L)",
       "rates": {
-        "enbw_cpo": { "ac": 0.39, "dc": 0.39, "hpc": 0.39, "start_fee": 0.00 },
-        "roaming": { "ac": 0.49, "dc": 0.59, "hpc": 0.59, "start_fee": 0.00 }
+        "enbw_cpo": {
+          "ac": 0.39,
+          "dc": 0.39,
+          "hpc": 0.39,
+          "start_fee": 0
+        },
+        "roaming": {
+          "ac": 0.49,
+          "dc": 0.59,
+          "hpc": 0.59,
+          "start_fee": 0
+        }
       }
     },
     "enbw_s": {
       "name": "EnBW mobility+ (Ladetarif S / Ad-hoc)",
       "rates": {
-        "enbw_cpo": { "ac": 0.59, "dc": 0.59, "hpc": 0.59, "start_fee": 0.00 },
-        "swh_cpo": { "ac": 0.52, "dc": 0.52, "hpc": 0.52, "start_fee": 1.00 },
-        "roaming": { "ac": 0.59, "dc": 0.69, "hpc": 0.69, "start_fee": 0.00 }
+        "enbw_cpo": {
+          "ac": 0.59,
+          "dc": 0.59,
+          "hpc": 0.59,
+          "start_fee": 0
+        },
+        "swh_cpo": {
+          "ac": 0.52,
+          "dc": 0.52,
+          "hpc": 0.52,
+          "start_fee": 1
+        },
+        "roaming": {
+          "ac": 0.59,
+          "dc": 0.69,
+          "hpc": 0.69,
+          "start_fee": 0
+        }
       }
     },
     "ewego": {
       "name": "EWE Go Ladekarte",
       "rates": {
-        "ewe_cpo": { "ac": 0.52, "dc": 0.52, "hpc": 0.52, "start_fee": 0.00 },
-        "roaming": { "ac": 0.62, "dc": 0.62, "hpc": 0.62, "start_fee": 0.00 }
+        "ewe_cpo": {
+          "ac": 0.52,
+          "dc": 0.52,
+          "hpc": 0.52,
+          "start_fee": 0
+        },
+        "roaming": {
+          "ac": 0.62,
+          "dc": 0.62,
+          "hpc": 0.62,
+          "start_fee": 0
+        }
       }
     },
     "ionity_passport": {
       "name": "Cupra Easy / Ionity Passport",
       "rates": {
-        "ionity_cpo": { "ac": 0.49, "dc": 0.49, "hpc": 0.49, "start_fee": 0.00 },
-        "roaming": { "ac": 0.59, "dc": 0.69, "hpc": 0.69, "start_fee": 0.00 }
+        "ionity_cpo": {
+          "ac": 0.49,
+          "dc": 0.49,
+          "hpc": 0.49,
+          "start_fee": 0
+        },
+        "roaming": {
+          "ac": 0.59,
+          "dc": 0.69,
+          "hpc": 0.69,
+          "start_fee": 0
+        }
       }
     },
     "maingau_kunde": {
       "name": "Maingau Autostrom (Kunde)",
       "rates": {
-        "all": { "ac": 0.52, "dc": 0.62, "hpc": 0.62, "start_fee": 0.00 }
+        "all": {
+          "ac": 0.52,
+          "dc": 0.62,
+          "hpc": 0.62,
+          "start_fee": 0
+        }
       }
     },
     "swh_kunde": {
       "name": "Stadtwerke Hockenheim Ladekarte",
       "rates": {
-        "swh_cpo": { "ac": 0.52, "dc": 0.52, "hpc": 0.52, "start_fee": 1.00 },
-        "roaming": { "ac": 0.52, "dc": 0.62, "hpc": 0.62, "start_fee": 0.00 }
+        "swh_cpo": {
+          "ac": 0.52,
+          "dc": 0.52,
+          "hpc": 0.52,
+          "start_fee": 1
+        },
+        "roaming": {
+          "ac": 0.52,
+          "dc": 0.62,
+          "hpc": 0.62,
+          "start_fee": 0
+        }
       }
     }
-  }
+  },
+  "last_checked_by": "GitHub Actions Autopilot"
 }
