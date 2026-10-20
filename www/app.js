@@ -2454,10 +2454,42 @@ async function connectVlinkerBle() {
                 console.warn("BLE enable check:", enErr);
             }
 
-            // Nativer Android-Geräteauswahl-Dialog
-            const device = await BlePlugin.requestDevice({
-                optionalServices: [NORDIC_UART_SERVICE, GENERIC_ELM_SERVICE, "0000fff0-0000-1000-8000-00805f9b34fb"]
-            });
+            // 1. Zuerst prüfen, ob der vLinker bereits im Android-System gekoppelt (bonded) ist
+            let device = null;
+            let fromBonded = false;
+
+            try {
+                if (typeof BlePlugin.getBondedDevices === "function") {
+                    const bondedRes = await BlePlugin.getBondedDevices();
+                    const bondedList = (bondedRes && bondedRes.devices) || [];
+                    console.log("Bonded Bluetooth devices:", bondedList);
+
+                    const obdMatches = bondedList.filter(d => {
+                        const n = (d.name || "").toLowerCase();
+                        return n.includes("vlinker") || n.includes("obd") || n.includes("vlink") || n.includes("v-link") || n.includes("icar");
+                    });
+
+                    if (obdMatches.length === 1) {
+                        device = obdMatches[0];
+                        fromBonded = true;
+                        showToast(`📡 Bereits gekoppelten Dongle "${device.name || 'vLinker'}" gefunden! Verbinde...`, "info");
+                    } else if (obdMatches.length > 1) {
+                        const lastId = localStorage.getItem("ev_last_ble_device_id");
+                        device = obdMatches.find(d => d.deviceId === lastId) || obdMatches[0];
+                        fromBonded = true;
+                        showToast(`📡 Verbinde gekoppelten Dongle "${device.name || 'vLinker'}"...`, "info");
+                    }
+                }
+            } catch (bondedErr) {
+                console.warn("getBondedDevices error:", bondedErr);
+            }
+
+            // 2. Falls kein gekoppelter vLinker gefunden wurde -> Nativer Android-Geräteauswahl-Dialog
+            if (!device || !device.deviceId) {
+                device = await BlePlugin.requestDevice({
+                    optionalServices: [NORDIC_UART_SERVICE, GENERIC_ELM_SERVICE, "0000fff0-0000-1000-8000-00805f9b34fb"]
+                });
+            }
 
             if (!device || !device.deviceId) {
                 throw new Error("Kein vLinker Gerät ausgewählt.");
@@ -2467,8 +2499,26 @@ async function connectVlinkerBle() {
             bleConnection.deviceId = device.deviceId;
             bleConnection.device = { name: device.name || "vLinker FS" };
 
-            // Verbinden
-            await BlePlugin.connect({ deviceId: device.deviceId, timeout: 12000 });
+            // Verbinden (bei Fehler auf bonded Gerät Fallback auf Scan)
+            try {
+                await BlePlugin.connect({ deviceId: device.deviceId, timeout: 12000 });
+            } catch (connErr) {
+                if (fromBonded) {
+                    console.warn("Direktverbindung zum gekoppelten Dongle fehlgeschlagen, starte Auswahldialog:", connErr);
+                    showToast("Gekoppelter Dongle antwortet nicht, starte Suchdialog...", "warning");
+                    device = await BlePlugin.requestDevice({
+                        optionalServices: [NORDIC_UART_SERVICE, GENERIC_ELM_SERVICE, "0000fff0-0000-1000-8000-00805f9b34fb"]
+                    });
+                    if (!device || !device.deviceId) throw connErr;
+                    bleConnection.deviceId = device.deviceId;
+                    bleConnection.device = { name: device.name || "vLinker FS" };
+                    await BlePlugin.connect({ deviceId: device.deviceId, timeout: 12000 });
+                } else {
+                    throw connErr;
+                }
+            }
+
+            localStorage.setItem("ev_last_ble_device_id", device.deviceId);
 
             // Services ermitteln
             await BlePlugin.discoverServices({ deviceId: device.deviceId });
