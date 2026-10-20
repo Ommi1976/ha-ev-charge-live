@@ -2562,5 +2562,183 @@ body.amoled-mode .leaflet-popup-content-wrapper {
     font-family: monospace;
 }
 
+/* OBD2 Device Picker & Live Debug Console */
+.obd-device-picker {
+    background: rgba(0, 0, 0, 0.25);
+    border: 1px solid var(--border-color);
+    border-radius: 10px;
+    padding: 10px 12px;
+    margin: 10px 0;
+}
+
+.obd-picker-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 6px;
+}
+
+.obd-picker-row label {
+    font-size: 0.78rem;
+    color: var(--text-secondary);
+    margin: 0;
+}
+
+.obd-select {
+    width: 100%;
+    background: var(--input-bg, #0f172a);
+    color: var(--text-primary, #f8fafc);
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    padding: 8px 10px;
+    font-size: 0.85rem;
+}
+
+.obd-select-inline {
+    background: var(--input-bg, #0f172a);
+    color: var(--text-primary, #f8fafc);
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    padding: 4px 8px;
+    font-size: 0.78rem;
+}
+
+.btn-obd-mini {
+    background: rgba(255, 255, 255, 0.08);
+    border: 1px solid var(--border-color);
+    color: var(--text-primary);
+    border-radius: 6px;
+    padding: 4px 9px;
+    font-size: 0.74rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background 0.15s;
+}
+
+.btn-obd-mini:hover {
+    background: rgba(255, 255, 255, 0.16);
+}
+
+.obd-debug-wrapper {
+    margin-top: 12px;
+    border: 1px solid var(--border-color);
+    border-radius: 10px;
+    background: rgba(2, 6, 23, 0.75);
+    overflow: hidden;
+}
+
+.obd-debug-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 8px 12px;
+    background: rgba(255, 255, 255, 0.04);
+    cursor: pointer;
+    font-size: 0.82rem;
+    font-weight: 700;
+    user-select: none;
+}
+
+.obd-debug-badge {
+    font-size: 0.72rem;
+    color: var(--accent-color, #c87a3e);
+    font-weight: 600;
+}
+
+.obd-debug-panel {
+    padding: 10px 12px;
+    border-top: 1px solid var(--border-color);
+}
+
+.obd-diag-meta {
+    font-size: 0.72rem;
+    color: #94a3b8;
+    font-family: monospace;
+    margin-bottom: 8px;
+    line-height: 1.35;
+}
+
+.obd-debug-toolbar {
+    display: flex;
+    gap: 6px;
+    flex-wrap: wrap;
+    margin-bottom: 8px;
+}
+
+.obd-debug-log {
+    background: #020617;
+    border: 1px solid rgba(148, 163, 184, 0.25);
+    border-radius: 8px;
+    padding: 8px;
+    height: 175px;
+    overflow-y: auto;
+    font-family: "Consolas", "Courier New", monospace;
+    font-size: 0.72rem;
+    line-height: 1.4;
+    color: #e2e8f0;
+    white-space: pre-wrap;
+    word-break: break-all;
+}
+
+.obd-log-line {
+    margin-bottom: 3px;
+    border-bottom: 1px dashed rgba(255, 255, 255, 0.05);
+    padding-bottom: 2px;
+}
+.obd-log-info { color: #93c5fd; }
+.obd-log-success { color: #34d399; font-weight: 600; }
+.obd-log-warn { color: #fbbf24; }
+.obd-log-error { color: #f87171; font-weight: 600; }
+.obd-log-tx { color: #c084fc; }
+.obd-log-rx { color: #6ee7b7; }
+
+.obd-manual-cmd-row {
+    display: flex;
+    gap: 6px;
+    margin-top: 8px;
+}
+
+.obd-manual-cmd-row input {
+    flex: 1;
+    background: #0f172a;
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    color: #f8fafc;
+    padding: 6px 8px;
+    font-size: 0.78rem;
+    font-family: monospace;
+}
+
+.btn-obd-send {
+    background: var(--accent-color, #c87a3e);
+    color: #fff;
+    border-color: transparent;
+}
+
+.obd-quick-chips {
+    display: flex;
+    gap: 5px;
+    flex-wrap: wrap;
+    margin-top: 6px;
+}
+
+.obd-chip {
+    background: rgba(255, 255, 255, 0.06);
+    border: 1px solid rgba(255, 255, 255, 0.14);
+    color: #cbd5e1;
+    border-radius: 12px;
+    padding: 3px 8px;
+    font-size: 0.68rem;
+    font-family: monospace;
+    cursor: pointer;
+}
+
+.obd-chip:hover {
+    background: var(--accent-color, #c87a3e);
+    color: #fff;
+}
+
+
 
 

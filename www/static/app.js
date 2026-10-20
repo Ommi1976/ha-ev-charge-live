@@ -2114,6 +2114,10 @@ window.openModal = function(id) {
     const el = document.getElementById(id);
     if (el) el.classList.add("active");
 
+    if (id === "modal-cupra-obd" && typeof window.refreshObdBondedDevices === "function") {
+        window.refreshObdBondedDevices(true);
+    }
+
     const mappedTab = MODAL_TO_TAB_MAP[id];
     if (mappedTab) {
         document.querySelectorAll(".nav-tab").forEach(t => t.classList.remove("active"));
@@ -2383,8 +2387,236 @@ window.saveCupraSettings = function() {
 };
 
 /* ==========================================================================
-   Vgate vLinker FS Bluetooth LE (OBD-II / UDS MEB Driver)
+   Vgate vLinker FS Dual-Stack Bluetooth Driver (Classic SPP / RFCOMM + BLE GATT)
+   inkl. Live-Diagnose-Konsole, Bonded-Device-Picker & Manuelles AT/UDS-Terminal
    ========================================================================== */
+let obdLogEntries = [];
+let cachedBondedDevices = [];
+let obdSppListenersRegistered = false;
+
+function formatObdTimestamp() {
+    const d = new Date();
+    const hh = String(d.getHours()).padStart(2, "0");
+    const mm = String(d.getMinutes()).padStart(2, "0");
+    const ss = String(d.getSeconds()).padStart(2, "0");
+    const ms = String(d.getMilliseconds()).padStart(3, "0");
+    return `${hh}:${mm}:${ss}.${ms}`;
+}
+
+function obdLog(level, message) {
+    const ts = formatObdTimestamp();
+    const upperLevel = String(level || "info").toUpperCase();
+    const lineText = `[${ts}] [${upperLevel}] ${message}`;
+    obdLogEntries.push({ ts, level: String(level || "info").toLowerCase(), text: lineText });
+    if (obdLogEntries.length > 350) {
+        obdLogEntries.shift();
+    }
+    console.log(`[OBD-${upperLevel}]`, message);
+
+    const logEl = document.getElementById("obd-debug-log");
+    if (logEl) {
+        const div = document.createElement("div");
+        div.className = `obd-log-line obd-log-${String(level || "info").toLowerCase()}`;
+        div.textContent = lineText;
+        logEl.appendChild(div);
+        while (logEl.childNodes.length > 350) {
+            logEl.removeChild(logEl.firstChild);
+        }
+        logEl.scrollTop = logEl.scrollHeight;
+    }
+}
+window.obdLog = obdLog;
+
+window.toggleObdDebugPanel = function() {
+    const panel = document.getElementById("obd-debug-panel");
+    const label = document.getElementById("obd-debug-toggle-label");
+    if (!panel) return;
+    const isHidden = panel.style.display === "none";
+    panel.style.display = isHidden ? "block" : "none";
+    if (label) label.textContent = isHidden ? "Ausblenden ▲" : "Anzeigen ▼";
+};
+
+window.clearObdDebugLog = function() {
+    obdLogEntries = [];
+    const logEl = document.getElementById("obd-debug-log");
+    if (logEl) logEl.innerHTML = "";
+    obdLog("info", "Diagnose-Log geleert.");
+};
+
+window.copyObdDebugLog = async function() {
+    const metaEl = document.getElementById("obd-diag-meta");
+    const header = [
+        "=== EV Charge Live OBD2 Diagnose-Protokoll (v1.3.8) ===",
+        `Zeitpunkt: ${new Date().toISOString()}`,
+        `Treiber-Info: ${metaEl ? metaEl.textContent : "n/a"}`,
+        `Verbindungsstatus: connected=${bleConnection.connected}, transport=${bleConnection.transport || "none"}, deviceId=${bleConnection.deviceId || "none"}`,
+        `Gekoppelte Geräte (${cachedBondedDevices.length}): ${JSON.stringify(cachedBondedDevices)}`,
+        "--- LOG VERLAUF ---"
+    ].join("\n");
+
+    const fullText = header + "\n" + obdLogEntries.map(e => e.text).join("\n");
+
+    try {
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+            await navigator.clipboard.writeText(fullText);
+            showToast("📋 Diagnose-Log in die Zwischenablage kopiert!", "success");
+            return;
+        }
+    } catch (e) {
+        console.warn("Clipboard API fallback:", e);
+    }
+
+    const ta = document.createElement("textarea");
+    ta.value = fullText;
+    ta.style.position = "fixed";
+    ta.style.opacity = "0";
+    document.body.appendChild(ta);
+    ta.focus();
+    ta.select();
+    try {
+        document.execCommand("copy");
+        showToast("📋 Diagnose-Log in die Zwischenablage kopiert!", "success");
+    } catch (err) {
+        showToast("Kopieren fehlgeschlagen: " + err.message, "error");
+    }
+    document.body.removeChild(ta);
+};
+
+function ensureObdNativeListeners() {
+    if (obdSppListenersRegistered) return;
+    const ObdClassic = window.Capacitor?.Plugins?.ObdClassic;
+    if (!ObdClassic || typeof ObdClassic.addListener !== "function") return;
+
+    obdSppListenersRegistered = true;
+
+    ObdClassic.addListener("obdDebug", (evt) => {
+        if (evt && evt.message) {
+            obdLog(evt.level || "info", `[SPP-Driver] ${evt.message}`);
+        }
+    });
+
+    ObdClassic.addListener("obdData", (evt) => {
+        if (!evt) return;
+        const rawText = evt.data || "";
+        const cleanPreview = rawText.replace(/\r/g, "\\r").replace(/\n/g, "\\n");
+        obdLog("rx", `RX (SPP ${evt.bytes || 0}B): "${cleanPreview}" [HEX: ${evt.hex || ""}]`);
+        if (rawText) {
+            handleBleRxChunk(rawText);
+        }
+    });
+
+    ObdClassic.addListener("obdDisconnected", (evt) => {
+        obdLog("warn", `SPP-Socket vom Dongle getrennt (${evt?.reason || "unbekannt"}).`);
+        onBleDisconnected();
+    });
+}
+
+function isLikelyObdDeviceName(name) {
+    const n = String(name || "").toLowerCase();
+    return (
+        n.includes("vlinker") ||
+        n.includes("v-link") ||
+        n.includes("vlink") ||
+        n.includes("obd") ||
+        n.includes("icar") ||
+        n.includes("vgate") ||
+        n.includes("elm") ||
+        n.includes("ios-vlink") ||
+        n.includes("android-vlink")
+    );
+}
+
+window.refreshObdBondedDevices = async function(silent = false) {
+    ensureObdNativeListeners();
+
+    const ObdClassic = window.Capacitor?.Plugins?.ObdClassic;
+    const BlePlugin = window.Capacitor?.Plugins?.BluetoothLe;
+    const hasObdClassic = Boolean(ObdClassic);
+    const hasCapacitorBle = Boolean(BlePlugin);
+    const hasWebBle = Boolean(navigator.bluetooth);
+
+    const metaEl = document.getElementById("obd-diag-meta");
+    if (metaEl) {
+        metaEl.textContent = `Treiber: Classic-SPP=${hasObdClassic ? "✅" : "❌"} | BLE-GATT=${hasCapacitorBle ? "✅" : "❌"} | WebBLE=${hasWebBle ? "✅" : "❌"}`;
+    }
+
+    if (!silent) {
+        obdLog("info", `Prüfe Bluetooth-Umgebung: ClassicSPP=${hasObdClassic}, BLE=${hasCapacitorBle}, WebBLE=${hasWebBle}`);
+    }
+
+    let bonded = [];
+    try {
+        if (hasObdClassic) {
+            await ObdClassic.ensurePermissions();
+            const res = await ObdClassic.getBondedDevices();
+            bonded = (res && res.devices) || [];
+            if (metaEl) {
+                metaEl.textContent = `Treiber: Classic-SPP=✅ | BLE-GATT=${hasCapacitorBle ? "✅" : "❌"} | Android SDK=${res?.sdkInt || "?"} | BT=${res?.enabled ? "AN" : "AUS"} | Gekoppelt=${bonded.length}`;
+            }
+            obdLog("info", `Android Bluetooth-Status: Aktiv=${res?.enabled}, SDK=${res?.sdkInt}, Gekoppelte Geräte=${bonded.length}`);
+        } else if (hasCapacitorBle) {
+            await BlePlugin.initialize({ androidNeverForLocation: false });
+            if (typeof BlePlugin.getBondedDevices === "function") {
+                const res = await BlePlugin.getBondedDevices();
+                bonded = ((res && res.devices) || []).map(d => ({
+                    name: d.name || "Unbekannt",
+                    address: d.deviceId,
+                    deviceId: d.deviceId,
+                    type: "UNKNOWN",
+                    supportsSpp: true
+                }));
+                obdLog("info", `Gekoppelte Geräte (über BLE-Plugin): ${bonded.length}`);
+            }
+        }
+    } catch (err) {
+        obdLog("error", `Fehler beim Abrufen gekoppelter Geräte: ${err?.message || err}`);
+    }
+
+    cachedBondedDevices = bonded;
+
+    const selectEl = document.getElementById("obd-device-select");
+    const lastId = localStorage.getItem("ev_last_ble_device_id");
+    let autoMatchedAddress = null;
+
+    if (selectEl) {
+        const previousVal = selectEl.value;
+        selectEl.innerHTML = `<option value="auto">⚡ Automatisch erkennen (vLinker / OBD)</option>`;
+
+        bonded.forEach((dev, idx) => {
+            const addr = dev.address || dev.deviceId || "";
+            const name = dev.name || "Unbekannt";
+            const typeLabel = dev.type || "BT";
+            const sppTag = dev.supportsSpp ? "SPP" : "BLE";
+            const opt = document.createElement("option");
+            opt.value = addr;
+            opt.textContent = `${name} [${addr}] (${typeLabel}/${sppTag})`;
+            selectEl.appendChild(opt);
+
+            if (!autoMatchedAddress && isLikelyObdDeviceName(name)) {
+                autoMatchedAddress = addr;
+            }
+            if (!silent || obdLogEntries.length < 15) {
+                obdLog("info", `  #${idx + 1}: "${name}" [${addr}] Typ=${typeLabel}, SPP=${Boolean(dev.supportsSpp)}, UUIDs=${JSON.stringify(dev.uuids || [])}`);
+            }
+        });
+
+        // Auswahl wiederherstellen oder besten Treffer vorauswählen
+        if (previousVal && previousVal !== "auto" && bonded.some(d => (d.address || d.deviceId) === previousVal)) {
+            selectEl.value = previousVal;
+        } else if (autoMatchedAddress) {
+            selectEl.value = autoMatchedAddress;
+            obdLog("success", `🎯 OBD-Dongle automatisch erkannt & ausgewählt: ${autoMatchedAddress}`);
+        } else if (lastId && bonded.some(d => (d.address || d.deviceId) === lastId)) {
+            selectEl.value = lastId;
+            obdLog("info", `Zuletzt verbundenes Gerät ausgewählt: ${lastId}`);
+        } else if (bonded.length > 0 && !silent) {
+            obdLog("warn", `Kein Gerät mit Namen "vLinker/OBD" gefunden. Bitte wähle deinen Dongle oben im Dropdown "Gekoppeltes Bluetooth-Gerät" manuell aus!`);
+        }
+    }
+
+    return bonded;
+};
+
 // Helper for text <-> hex conversion for native Android BLE write
 function textToHex(text) {
     let hex = "";
@@ -2405,11 +2637,23 @@ function hexToText(hex) {
 }
 
 async function connectVlinkerBle() {
-    const hasCapacitorBle = Boolean(window.Capacitor?.Plugins?.BluetoothLe);
+    ensureObdNativeListeners();
+
+    const ObdClassic = window.Capacitor?.Plugins?.ObdClassic;
+    const BlePlugin = window.Capacitor?.Plugins?.BluetoothLe;
+    const hasObdClassic = Boolean(ObdClassic);
+    const hasCapacitorBle = Boolean(BlePlugin);
     const hasWebBle = Boolean(navigator.bluetooth);
 
-    if (!hasCapacitorBle && !hasWebBle) {
-        showToast("Bluetooth wird von diesem Browser nicht unterstützt. Bitte die Android-APK oder Chrome auf Android nutzen.", "warning");
+    // Debug-Panel beim Verbinden automatisch sichtbar machen
+    const debugPanel = document.getElementById("obd-debug-panel");
+    const debugLabel = document.getElementById("obd-debug-toggle-label");
+    if (debugPanel) debugPanel.style.display = "block";
+    if (debugLabel) debugLabel.textContent = "Ausblenden ▲";
+
+    if (!hasObdClassic && !hasCapacitorBle && !hasWebBle) {
+        obdLog("error", "Keine Bluetooth-Schnittstelle verfügbar (weder Native APK noch WebBluetooth).");
+        showToast("Bluetooth wird von diesem Browser nicht unterstützt. Bitte die Android-APK nutzen.", "warning");
         return;
     }
 
@@ -2417,226 +2661,328 @@ async function connectVlinkerBle() {
     const btnDisconnect = document.getElementById("btn-obd-disconnect");
     const statusPill = document.getElementById("obd-status-pill");
     const telemetryBox = document.getElementById("obd-live-telemetry");
+    const selectEl = document.getElementById("obd-device-select");
+    const protoEl = document.getElementById("obd-protocol-select");
+
+    const selectedDeviceValue = selectEl ? selectEl.value : "auto";
+    const selectedProto = protoEl ? protoEl.value : "auto";
 
     if (btnConnect) {
         btnConnect.disabled = true;
         btnConnect.textContent = "Verbinde mit vLinker...";
     }
 
-    // Bekannte vLinker / ELM327 BLE UUIDs
     const NORDIC_UART_SERVICE = "6e400001-b5a3-f393-e0a9-e50e24dcca9e";
-    const NORDIC_TX_CHAR = "6e400002-b5a3-f393-e0a9-e50e24dcca9e"; // Write
-    const NORDIC_RX_CHAR = "6e400003-b5a3-f393-e0a9-e50e24dcca9e"; // Notify
+    const NORDIC_TX_CHAR = "6e400002-b5a3-f393-e0a9-e50e24dcca9e";
+    const NORDIC_RX_CHAR = "6e400003-b5a3-f393-e0a9-e50e24dcca9e";
     const GENERIC_ELM_SERVICE = "0000ffe0-0000-1000-8000-00805f9b34fb";
     const GENERIC_ELM_CHAR = "0000ffe1-0000-1000-8000-00805f9b34fb";
 
     try {
-        // Bestehende Verbindung sauber trennen
         if (bleConnection.telemetryInterval) {
             clearInterval(bleConnection.telemetryInterval);
             bleConnection.telemetryInterval = null;
         }
+        bleConnection.connected = false;
+        bleConnection.transport = null;
 
-        if (hasCapacitorBle) {
-            // ==========================================
-            // NATIVE ANDROID BLE (Capacitor APK)
-            // ==========================================
-            const BlePlugin = window.Capacitor.Plugins.BluetoothLe;
-            await BlePlugin.initialize({ androidNeverForLocation: false });
+        obdLog("info", `=== Starte Verbindungsaufbau (Gerät: ${selectedDeviceValue}, Protokoll: ${selectedProto}) ===`);
 
-            // Bluetooth Status prüfen & ggf. aktivieren
-            try {
-                const en = await BlePlugin.isEnabled();
-                if (!en || !en.value) {
-                    await BlePlugin.requestEnable();
+        // Gekoppelte Geräte aktualisieren
+        const bondedList = await window.refreshObdBondedDevices(true);
+
+        // Zielgerät aus Auswahl oder Auto-Erkennung bestimmen
+        let targetDevice = null;
+        if (selectedDeviceValue && selectedDeviceValue !== "auto") {
+            targetDevice = bondedList.find(d => (d.address || d.deviceId) === selectedDeviceValue) || {
+                name: "Ausgewähltes Gerät",
+                address: selectedDeviceValue,
+                deviceId: selectedDeviceValue,
+                type: "CLASSIC"
+            };
+            obdLog("info", `Manuell gewähltes Gerät: "${targetDevice.name}" [${targetDevice.address}] (${targetDevice.type})`);
+        } else {
+            const obdMatches = bondedList.filter(d => isLikelyObdDeviceName(d.name));
+            if (obdMatches.length === 1) {
+                targetDevice = obdMatches[0];
+                obdLog("info", `Auto-Match (eindeutig): "${targetDevice.name}" [${targetDevice.address}] (${targetDevice.type})`);
+            } else if (obdMatches.length > 1) {
+                const lastId = localStorage.getItem("ev_last_ble_device_id");
+                targetDevice = obdMatches.find(d => (d.address || d.deviceId) === lastId) || obdMatches[0];
+                obdLog("info", `Auto-Match (aus ${obdMatches.length} OBD-Geräten): "${targetDevice.name}" [${targetDevice.address}]`);
+            } else if (bondedList.length === 1) {
+                targetDevice = bondedList[0];
+                obdLog("info", `Nur 1 gekoppeltes Gerät vorhanden, verwende: "${targetDevice.name}" [${targetDevice.address}]`);
+            } else if (bondedList.length > 1) {
+                // Prüfen ob genau 1 Gerät die SPP-UUID (00001101) besitzt und kein Audio/Headset ist
+                const lastId = localStorage.getItem("ev_last_ble_device_id");
+                const byLast = lastId ? bondedList.find(d => (d.address || d.deviceId) === lastId) : null;
+                if (byLast) {
+                    targetDevice = byLast;
+                    obdLog("info", `Verwende zuletzt gewähltes Gerät: "${targetDevice.name}" [${targetDevice.address}]`);
+                } else {
+                    obdLog("warn", `Kein Gerät heißt "vLinker/OBD" unter den ${bondedList.length} gekoppelten Geräten. Bitte wähle das gewünschte Gerät im Dropdown aus!`);
                 }
-            } catch (enErr) {
-                console.warn("BLE enable check:", enErr);
             }
+        }
 
-            // 1. Zuerst prüfen, ob der vLinker bereits im Android-System gekoppelt (bonded) ist
-            let device = null;
-            let fromBonded = false;
+        // =========================================================================
+        // STUFE 1: BLUETOOTH CLASSIC SPP / RFCOMM (Standard für Vgate vLinker FS BT)
+        // =========================================================================
+        const shouldTrySpp = hasObdClassic && selectedProto !== "ble";
+        if (shouldTrySpp && targetDevice && (targetDevice.address || targetDevice.deviceId)) {
+            const addr = targetDevice.address || targetDevice.deviceId;
+            let sppStrategy = "auto";
+            if (selectedProto === "spp_secure") sppStrategy = "secure";
+            else if (selectedProto === "spp_insecure") sppStrategy = "insecure";
+            else if (selectedProto === "spp_reflection") sppStrategy = "reflection";
 
             try {
-                if (typeof BlePlugin.getBondedDevices === "function") {
-                    const bondedRes = await BlePlugin.getBondedDevices();
-                    const bondedList = (bondedRes && bondedRes.devices) || [];
-                    console.log("Bonded Bluetooth devices:", bondedList);
+                obdLog("info", `Starte Bluetooth Classic SPP (RFCOMM) zu "${targetDevice.name}" [${addr}] (Strategie: ${sppStrategy})...`);
+                showToast(`📡 Verbinde via Classic SPP mit "${targetDevice.name || addr}"...`, "info");
 
-                    const obdMatches = bondedList.filter(d => {
-                        const n = (d.name || "").toLowerCase();
-                        return n.includes("vlinker") || n.includes("obd") || n.includes("vlink") || n.includes("v-link") || n.includes("icar");
-                    });
-
-                    if (obdMatches.length === 1) {
-                        device = obdMatches[0];
-                        fromBonded = true;
-                        showToast(`📡 Bereits gekoppelten Dongle "${device.name || 'vLinker'}" gefunden! Verbinde...`, "info");
-                    } else if (obdMatches.length > 1) {
-                        const lastId = localStorage.getItem("ev_last_ble_device_id");
-                        device = obdMatches.find(d => d.deviceId === lastId) || obdMatches[0];
-                        fromBonded = true;
-                        showToast(`📡 Verbinde gekoppelten Dongle "${device.name || 'vLinker'}"...`, "info");
-                    }
-                }
-            } catch (bondedErr) {
-                console.warn("getBondedDevices error:", bondedErr);
-            }
-
-            // 2. Falls kein gekoppelter vLinker gefunden wurde -> Nativer Android-Geräteauswahl-Dialog
-            if (!device || !device.deviceId) {
-                device = await BlePlugin.requestDevice({
-                    optionalServices: [NORDIC_UART_SERVICE, GENERIC_ELM_SERVICE, "0000fff0-0000-1000-8000-00805f9b34fb"]
+                const sppRes = await ObdClassic.connectSpp({
+                    address: addr,
+                    strategy: sppStrategy
                 });
+
+                bleConnection.connected = true;
+                bleConnection.isNative = true;
+                bleConnection.transport = "spp";
+                bleConnection.deviceId = addr;
+                bleConnection.device = { name: sppRes?.name || targetDevice.name || "vLinker FS" };
+                localStorage.setItem("ev_last_ble_device_id", addr);
+
+                obdLog("success", `✅ Classic SPP verbunden mit "${bleConnection.device.name}" [${addr}] über Strategie [${sppRes?.strategy || sppStrategy}]!`);
+            } catch (sppErr) {
+                const errMsg = sppErr?.message || String(sppErr);
+                obdLog("error", `❌ Classic SPP Verbindung zu [${addr}] fehlgeschlagen: ${errMsg}`);
+                if (selectedProto.startsWith("spp_")) {
+                    throw new Error(`Classic SPP fehlgeschlagen: ${errMsg}`);
+                }
+                obdLog("warn", "Prüfe BLE-GATT Fallback...");
             }
-
-            if (!device || !device.deviceId) {
-                throw new Error("Kein vLinker Gerät ausgewählt.");
+        } else if (shouldTrySpp && !targetDevice) {
+            if (selectedProto.startsWith("spp_")) {
+                throw new Error("Bitte wähle zuerst deinen gekoppelten Dongle oben im Dropdown 'Gekoppeltes Bluetooth-Gerät' aus.");
             }
+            obdLog("warn", "Kein gekoppeltes Zielgerät für Classic SPP ausgewählt -> versuche BLE-Suche...");
+        }
 
-            bleConnection.isNative = true;
-            bleConnection.deviceId = device.deviceId;
-            bleConnection.device = { name: device.name || "vLinker FS" };
+        // =========================================================================
+        // STUFE 2: BLUETOOTH LOW ENERGY (BLE GATT) FALLBACK
+        // =========================================================================
+        if (!bleConnection.connected) {
+            if (hasCapacitorBle) {
+                obdLog("info", "Initialisiere Native BLE (GATT)...");
+                await BlePlugin.initialize({ androidNeverForLocation: false });
 
-            // Verbinden (bei Fehler auf bonded Gerät Fallback auf Scan)
-            try {
-                await BlePlugin.connect({ deviceId: device.deviceId, timeout: 12000 });
-            } catch (connErr) {
-                if (fromBonded) {
-                    console.warn("Direktverbindung zum gekoppelten Dongle fehlgeschlagen, starte Auswahldialog:", connErr);
-                    showToast("Gekoppelter Dongle antwortet nicht, starte Suchdialog...", "warning");
-                    device = await BlePlugin.requestDevice({
+                try {
+                    const en = await BlePlugin.isEnabled();
+                    if (!en || !en.value) {
+                        obdLog("warn", "Bluetooth ist deaktiviert -> fordere Aktivierung an...");
+                        await BlePlugin.requestEnable();
+                    }
+                } catch (enErr) {
+                    obdLog("warn", `BLE isEnabled Check: ${enErr?.message || enErr}`);
+                }
+
+                let bleDevice = targetDevice ? { deviceId: targetDevice.deviceId || targetDevice.address, name: targetDevice.name } : null;
+                let fromBonded = Boolean(bleDevice && bleDevice.deviceId);
+
+                if (fromBonded && targetDevice.type === "CLASSIC" && selectedProto === "auto") {
+                    obdLog("warn", `Hinweis: "${targetDevice.name}" meldet Typ=CLASSIC (kein BLE). Versuche dennoch GATT-Connect, danach BLE-Scan...`);
+                }
+
+                if (!bleDevice || !bleDevice.deviceId) {
+                    obdLog("info", "Öffne nativen BLE-Gerätesuchdialog (requestDevice)...");
+                    bleDevice = await BlePlugin.requestDevice({
                         optionalServices: [NORDIC_UART_SERVICE, GENERIC_ELM_SERVICE, "0000fff0-0000-1000-8000-00805f9b34fb"]
                     });
-                    if (!device || !device.deviceId) throw connErr;
-                    bleConnection.deviceId = device.deviceId;
-                    bleConnection.device = { name: device.name || "vLinker FS" };
-                    await BlePlugin.connect({ deviceId: device.deviceId, timeout: 12000 });
-                } else {
-                    throw connErr;
                 }
-            }
 
-            localStorage.setItem("ev_last_ble_device_id", device.deviceId);
-
-            // Services ermitteln
-            await BlePlugin.discoverServices({ deviceId: device.deviceId });
-            const sRes = await BlePlugin.getServices({ deviceId: device.deviceId });
-            const sList = (sRes && sRes.services) || [];
-
-            let targetService = NORDIC_UART_SERVICE;
-            let targetTx = NORDIC_TX_CHAR;
-            let targetRx = NORDIC_RX_CHAR;
-
-            const hasNordic = sList.some(s => (s.uuid || "").toLowerCase().includes("6e400001"));
-            if (!hasNordic) {
-                const hasGeneric = sList.some(s => (s.uuid || "").toLowerCase().includes("ffe0"));
-                if (hasGeneric) {
-                    targetService = GENERIC_ELM_SERVICE;
-                    targetTx = GENERIC_ELM_CHAR;
-                    targetRx = GENERIC_ELM_CHAR;
+                if (!bleDevice || !bleDevice.deviceId) {
+                    throw new Error("Kein Bluetooth-Gerät ausgewählt.");
                 }
-            }
 
-            bleConnection.serviceUuid = targetService;
-            bleConnection.txCharUuid = targetTx;
-            bleConnection.rxCharUuid = targetRx;
+                bleConnection.isNative = true;
+                bleConnection.transport = "ble";
+                bleConnection.deviceId = bleDevice.deviceId;
+                bleConnection.device = { name: bleDevice.name || "vLinker FS" };
 
-            // Notification Listener registrieren
-            const notifKey = `notification|${device.deviceId}|${targetService}|${targetRx}`;
-            const listenerHandle = await BlePlugin.addListener(notifKey, (event) => {
-                let text = "";
-                if (typeof event?.value === "string") {
-                    text = hexToText(event.value);
-                } else if (event?.value?.buffer) {
-                    text = new TextDecoder("utf-8").decode(event.value);
-                }
-                if (text) handleBleRxChunk(text);
-            });
-            bleConnection.nativeListenerHandle = listenerHandle;
-
-            await BlePlugin.startNotifications({
-                deviceId: device.deviceId,
-                service: targetService,
-                characteristic: targetRx
-            });
-
-            bleConnection.connected = true;
-
-        } else {
-            // ==========================================
-            // BROWSER WEB BLUETOOTH (Chrome / Web Fallback)
-            // ==========================================
-            if (bleConnection.device) {
-                bleConnection.device.removeEventListener("gattserverdisconnected", onBleDisconnected);
-            }
-
-            const device = await navigator.bluetooth.requestDevice({
-                filters: [
-                    { namePrefix: "vLinker" },
-                    { namePrefix: "OBD" },
-                    { namePrefix: "IOS-Vlink" },
-                    { namePrefix: "Android-Vlink" },
-                    { namePrefix: "V-LINK" }
-                ],
-                optionalServices: [NORDIC_UART_SERVICE, GENERIC_ELM_SERVICE, "0000fff0-0000-1000-8000-00805f9b34fb"]
-            });
-
-            device.addEventListener("gattserverdisconnected", onBleDisconnected);
-            bleConnection.isNative = false;
-            bleConnection.device = device;
-
-            const server = await device.gatt.connect();
-            bleConnection.server = server;
-
-            let service = null;
-            try {
-                service = await server.getPrimaryService(NORDIC_UART_SERVICE);
-                bleConnection.txChar = await service.getCharacteristic(NORDIC_TX_CHAR);
-                bleConnection.rxChar = await service.getCharacteristic(NORDIC_RX_CHAR);
-            } catch (e1) {
                 try {
-                    service = await server.getPrimaryService(GENERIC_ELM_SERVICE);
-                    bleConnection.txChar = await service.getCharacteristic(GENERIC_ELM_CHAR);
-                    bleConnection.rxChar = bleConnection.txChar;
-                } catch (e2) {
-                    throw new Error("Konnte kompatiblen UART/OBD-Kanal auf dem Dongle nicht finden.");
+                    obdLog("info", `Verbinde via BLE-GATT mit ${bleDevice.deviceId} (Timeout 12s)...`);
+                    await BlePlugin.connect({ deviceId: bleDevice.deviceId, timeout: 12000 });
+                } catch (connErr) {
+                    obdLog("error", `BLE-GATT Direktverbindung zu ${bleDevice.deviceId} fehlgeschlagen: ${connErr?.message || connErr}`);
+                    if (fromBonded) {
+                        obdLog("info", "Starte interaktiven BLE-Scan-Dialog als Fallback...");
+                        showToast("Gekoppelter Dongle antwortet nicht auf BLE-GATT, starte BLE-Scan...", "warning");
+                        bleDevice = await BlePlugin.requestDevice({
+                            optionalServices: [NORDIC_UART_SERVICE, GENERIC_ELM_SERVICE, "0000fff0-0000-1000-8000-00805f9b34fb"]
+                        });
+                        if (!bleDevice || !bleDevice.deviceId) throw connErr;
+                        bleConnection.deviceId = bleDevice.deviceId;
+                        bleConnection.device = { name: bleDevice.name || "vLinker FS" };
+                        await BlePlugin.connect({ deviceId: bleDevice.deviceId, timeout: 12000 });
+                    } else {
+                        throw connErr;
+                    }
                 }
-            }
 
-            await bleConnection.rxChar.startNotifications();
-            bleConnection.rxChar.removeEventListener("characteristicvaluechanged", handleBleNotification);
-            bleConnection.rxChar.addEventListener("characteristicvaluechanged", handleBleNotification);
-            bleConnection.connected = true;
+                localStorage.setItem("ev_last_ble_device_id", bleDevice.deviceId);
+
+                obdLog("info", "Suche GATT-Services (discoverServices)...");
+                await BlePlugin.discoverServices({ deviceId: bleDevice.deviceId });
+                const sRes = await BlePlugin.getServices({ deviceId: bleDevice.deviceId });
+                const sList = (sRes && sRes.services) || [];
+                obdLog("info", `Gefundene GATT-Services (${sList.length}): ${sList.map(s => s.uuid).join(", ") || "keine"}`);
+
+                let targetService = NORDIC_UART_SERVICE;
+                let targetTx = NORDIC_TX_CHAR;
+                let targetRx = NORDIC_RX_CHAR;
+
+                const hasNordic = sList.some(s => (s.uuid || "").toLowerCase().includes("6e400001"));
+                if (!hasNordic) {
+                    const hasGeneric = sList.some(s => (s.uuid || "").toLowerCase().includes("ffe0"));
+                    if (hasGeneric) {
+                        targetService = GENERIC_ELM_SERVICE;
+                        targetTx = GENERIC_ELM_CHAR;
+                        targetRx = GENERIC_ELM_CHAR;
+                    } else if (sList.length > 0) {
+                        // Dynamischer Fallback auf ersten schreib-/notify-fähigen Custom-Service
+                        for (const srv of sList) {
+                            const u = (srv.uuid || "").toLowerCase();
+                            if (u.startsWith("00001800") || u.startsWith("00001801") || u.startsWith("0000180a")) continue;
+                            const chars = srv.characteristics || [];
+                            const writeC = chars.find(c => c.properties?.write || c.properties?.writeWithoutResponse);
+                            const notifyC = chars.find(c => c.properties?.notify || c.properties?.indicate);
+                            if (writeC && notifyC) {
+                                targetService = srv.uuid;
+                                targetTx = writeC.uuid;
+                                targetRx = notifyC.uuid;
+                                obdLog("info", `Nutze dynamischen GATT-Service ${targetService} (TX=${targetTx}, RX=${targetRx})`);
+                                break;
+                            }
+                        }
+                    }
+                }
+
+                bleConnection.serviceUuid = targetService;
+                bleConnection.txCharUuid = targetTx;
+                bleConnection.rxCharUuid = targetRx;
+
+                const notifKey = `notification|${bleDevice.deviceId}|${targetService}|${targetRx}`;
+                const listenerHandle = await BlePlugin.addListener(notifKey, (event) => {
+                    let text = "";
+                    if (typeof event?.value === "string") {
+                        text = hexToText(event.value);
+                    } else if (event?.value?.buffer) {
+                        text = new TextDecoder("utf-8").decode(event.value);
+                    }
+                    if (text) {
+                        const cleanPreview = text.replace(/\r/g, "\\r").replace(/\n/g, "\\n");
+                        obdLog("rx", `RX (BLE): "${cleanPreview}" [HEX: ${event?.value || ""}]`);
+                        handleBleRxChunk(text);
+                    }
+                });
+                bleConnection.nativeListenerHandle = listenerHandle;
+
+                await BlePlugin.startNotifications({
+                    deviceId: bleDevice.deviceId,
+                    service: targetService,
+                    characteristic: targetRx
+                });
+
+                bleConnection.connected = true;
+                obdLog("success", `✅ BLE-GATT verbunden (Service: ${targetService})`);
+
+            } else {
+                // BROWSER WEB BLUETOOTH FALLBACK
+                obdLog("info", "Starte Web-Bluetooth Geräteauswahl...");
+                if (bleConnection.device) {
+                    bleConnection.device.removeEventListener("gattserverdisconnected", onBleDisconnected);
+                }
+
+                const device = await navigator.bluetooth.requestDevice({
+                    filters: [
+                        { namePrefix: "vLinker" },
+                        { namePrefix: "OBD" },
+                        { namePrefix: "IOS-Vlink" },
+                        { namePrefix: "Android-Vlink" },
+                        { namePrefix: "V-LINK" }
+                    ],
+                    optionalServices: [NORDIC_UART_SERVICE, GENERIC_ELM_SERVICE, "0000fff0-0000-1000-8000-00805f9b34fb"]
+                });
+
+                device.addEventListener("gattserverdisconnected", onBleDisconnected);
+                bleConnection.isNative = false;
+                bleConnection.transport = "webble";
+                bleConnection.device = device;
+
+                const server = await device.gatt.connect();
+                bleConnection.server = server;
+
+                let service = null;
+                try {
+                    service = await server.getPrimaryService(NORDIC_UART_SERVICE);
+                    bleConnection.txChar = await service.getCharacteristic(NORDIC_TX_CHAR);
+                    bleConnection.rxChar = await service.getCharacteristic(NORDIC_RX_CHAR);
+                } catch (e1) {
+                    try {
+                        service = await server.getPrimaryService(GENERIC_ELM_SERVICE);
+                        bleConnection.txChar = await service.getCharacteristic(GENERIC_ELM_CHAR);
+                        bleConnection.rxChar = bleConnection.txChar;
+                    } catch (e2) {
+                        throw new Error("Konnte kompatiblen UART/OBD-Kanal auf dem Dongle nicht finden.");
+                    }
+                }
+
+                await bleConnection.rxChar.startNotifications();
+                bleConnection.rxChar.removeEventListener("characteristicvaluechanged", handleBleNotification);
+                bleConnection.rxChar.addEventListener("characteristicvaluechanged", handleBleNotification);
+                bleConnection.connected = true;
+                obdLog("success", "✅ Web-Bluetooth verbunden!");
+            }
         }
 
         if (statusPill) {
             statusPill.className = "badge badge-success";
-            statusPill.textContent = "Verbunden";
+            statusPill.textContent = bleConnection.transport === "spp" ? "Verbunden (Classic SPP)" : "Verbunden (BLE)";
         }
         if (btnConnect) btnConnect.style.display = "none";
         if (btnDisconnect) btnDisconnect.style.display = "inline-block";
         if (telemetryBox) telemetryBox.style.display = "grid";
 
-        showToast("⚡ Mit Vgate vLinker FS gekoppelt! Initialisiere UDS...", "success");
+        showToast(`⚡ Mit ${bleConnection.device?.name || "vLinker"} (${(bleConnection.transport || "BT").toUpperCase()}) verbunden! Initialisiere...`, "success");
 
-        // ELM327 / MEB UDS Initialisierung
+        // ELM327 / vLinker / MEB UDS Initialisierung
+        obdLog("info", "Sende ELM327/vLinker Initialisierungs-Sequenz...");
         await sendBleCommand("ATZ");
-        await new Promise(r => setTimeout(r, 600));
+        await new Promise(r => setTimeout(r, 800));
+        await sendBleCommand("ATI");
+        await new Promise(r => setTimeout(r, 250));
         await sendBleCommand("ATE0");
+        await new Promise(r => setTimeout(r, 200));
         await sendBleCommand("ATL0");
+        await new Promise(r => setTimeout(r, 200));
         await sendBleCommand("ATH0");
+        await new Promise(r => setTimeout(r, 200));
+        await sendBleCommand("ATRV"); // 12V Spannung direkt vom Dongle-ADC
+        await new Promise(r => setTimeout(r, 250));
         await sendBleCommand("ATSP6"); // ISO 15765-4 CAN 11bit 500k
+        await new Promise(r => setTimeout(r, 250));
         await sendBleCommand("ATSH 7E5"); // Header auf MEB BMS 7E5
+        await new Promise(r => setTimeout(r, 250));
 
-        // Erste Abfrage starten + zyklisches Polling alle 8 Sekunden für Live-SoC, SoH, 12V & Stecker-Automatik
+        // Erste Abfrage starten + zyklisches Polling alle 8 Sekunden
         await queryBornTelemetry();
         bleConnection.telemetryInterval = setInterval(queryBornTelemetry, 8000);
 
     } catch (err) {
-        console.error("BLE Fehler:", err);
-        showToast("Bluetooth-Verbindung abgebrochen: " + err.message, "warning");
+        const msg = err?.message || String(err);
+        obdLog("error", `Verbindungsaufbau abgebrochen: ${msg}`);
+        showToast("Bluetooth-Fehler: " + msg, "warning");
         onBleDisconnected();
     } finally {
         if (btnConnect) {
@@ -2655,9 +3001,15 @@ function handleBleRxChunk(chunk) {
         return;
     }
 
-    if (bleResponseBuffer.includes(">") || bleResponseBuffer.includes("\r")) {
+    if (bleResponseBuffer.includes(">") || bleResponseBuffer.includes("\r") || bleResponseBuffer.includes("\n")) {
         parseBleResponse(bleResponseBuffer);
-        bleResponseBuffer = "";
+        if (bleResponseBuffer.includes(">")) {
+            bleResponseBuffer = "";
+        } else {
+            // Nur abgeschlossene Zeilen verarbeiten
+            const lastCr = Math.max(bleResponseBuffer.lastIndexOf("\r"), bleResponseBuffer.lastIndexOf("\n"));
+            bleResponseBuffer = bleResponseBuffer.substring(lastCr + 1);
+        }
     }
 }
 
@@ -2665,10 +3017,37 @@ function handleBleNotification(event) {
     const val = event.target.value;
     const decoder = new TextDecoder("utf-8");
     const chunk = decoder.decode(val);
+    obdLog("rx", `RX (WebBLE): "${chunk.replace(/\r/g, "\\r").replace(/\n/g, "\\n")}"`);
     handleBleRxChunk(chunk);
 }
 
+function update12vDisplay(volts) {
+    if (isNaN(volts) || volts < 5 || volts > 20) return;
+    cupraState.battery12vVoltage = Number(volts.toFixed(1));
+    const el = document.getElementById("obd-val-12v");
+    if (el) {
+        let badgeColor = "#34d399";
+        if (volts < 11.9) badgeColor = "#ef4444";
+        else if (volts <= 12.3) badgeColor = "#f59e0b";
+        el.innerHTML = `<span style="color:${badgeColor};font-weight:700;">${volts.toFixed(1)} V</span>`;
+    }
+    if (volts < 11.9 && !cupraState.warned12v) {
+        cupraState.warned12v = true;
+        showToast(`⚠️ WARNUNG: 12V-Bordnetzbatterie kritisch (${volts.toFixed(1)} V)! Bitte Born einschalten/laden.`, "error");
+    }
+}
+
 function parseBleResponse(response) {
+    // 0. Direktes ATRV Spannungs-Format prüfen (z.B. "12.4V" oder "12,4V")
+    const atrvMatch = response.match(/(\d{1,2}[.,]\d{1,2})\s*V/i);
+    if (atrvMatch) {
+        const v = parseFloat(atrvMatch[1].replace(",", "."));
+        if (!isNaN(v)) {
+            update12vDisplay(v);
+            obdLog("success", `📊 ATRV 12V-Bordnetzspannung erkannt: ${v.toFixed(1)} V`);
+        }
+    }
+
     const cleaned = response.replace(/\s+/g, "").toUpperCase();
 
     // Display SoC (PID 02 8C -> Positiv-Antwort 62 02 8C [BYTE])
@@ -2683,6 +3062,7 @@ function parseBleResponse(response) {
                 cupraState.source = "ble";
                 const el = document.getElementById("obd-val-soc");
                 if (el) el.textContent = `${soc} %`;
+                obdLog("success", `📊 Display-SoC (PID 028C): ${soc} % (raw=0x${hexVal})`);
                 updateCupraUi();
                 renderMapMarkers(activeStations, false);
             }
@@ -2700,6 +3080,7 @@ function parseBleResponse(response) {
                 cupraState.realBmsSoc = realSoc;
                 const el = document.getElementById("obd-val-real-soc");
                 if (el) el.textContent = `${realSoc} %`;
+                obdLog("success", `📊 BMS Real-SoC (PID 028D): ${realSoc} % (raw=0x${hexVal})`);
             }
         }
     }
@@ -2715,6 +3096,7 @@ function parseBleResponse(response) {
                 cupraState.batteryTemp = temp;
                 const el = document.getElementById("obd-val-temp");
                 if (el) el.textContent = `${temp} °C`;
+                obdLog("success", `📊 Akkutemperatur (PID 028E): ${temp} °C (raw=0x${hexVal})`);
             }
         }
     }
@@ -2727,18 +3109,8 @@ function parseBleResponse(response) {
             const raw = parseInt(hexVal, 16);
             if (!isNaN(raw)) {
                 const volts = (raw / 10.0) || 12.4;
-                cupraState.battery12vVoltage = Number(volts.toFixed(1));
-                const el = document.getElementById("obd-val-12v");
-                if (el) {
-                    let badgeColor = "#34d399";
-                    if (volts < 11.9) badgeColor = "#ef4444";
-                    else if (volts <= 12.3) badgeColor = "#f59e0b";
-                    el.innerHTML = `<span style="color:${badgeColor};font-weight:700;">${volts.toFixed(1)} V</span>`;
-                }
-                if (volts < 11.9 && !cupraState.warned12v) {
-                    cupraState.warned12v = true;
-                    showToast(`⚠️ WARNUNG: 12V-Bordnetzbatterie kritisch (${volts.toFixed(1)} V)! Bitte Born einschalten/laden.`, "error");
-                }
+                update12vDisplay(volts);
+                obdLog("success", `📊 12V Bordnetz (PID 0288): ${volts.toFixed(1)} V (raw=0x${hexVal})`);
             }
         }
     }
@@ -2763,6 +3135,7 @@ function parseBleResponse(response) {
                     const usable = ((cupraState.batteryCapacity || 58) * (soh / 100)).toFixed(1);
                     metric.textContent = `${usable} kWh netto`;
                 }
+                obdLog("success", `📊 Batterie-SoH (PID 028A): ${soh} % (raw=0x${hexVal})`);
             }
         }
     }
@@ -2777,6 +3150,7 @@ function parseBleResponse(response) {
                 cupraState.soh = raw;
                 const el = document.getElementById("obd-val-soh");
                 if (el) el.textContent = `${raw} %`;
+                obdLog("success", `📊 Batterie-SoH (PID 1E3B): ${raw} % (raw=0x${hexVal})`);
             }
         }
     }
@@ -2810,7 +3184,6 @@ function parseBleResponse(response) {
                 const el = document.getElementById("obd-val-plug");
                 if (el) el.textContent = plugStr;
 
-                // Auto-Timer & Auto-Logbuch Trigger
                 const autoEnabled = document.getElementById("obd-auto-plug-timer") ? document.getElementById("obd-auto-plug-timer").checked : true;
                 if (autoEnabled) {
                     handleAutoPlugEvent(prevPlugState, plugState);
@@ -2844,10 +3217,18 @@ function handleAutoPlugEvent(prev, current) {
 }
 
 async function sendBleCommand(cmd) {
-    if (!bleConnection.connected) return;
+    if (!bleConnection.connected) {
+        obdLog("warn", `Befehl "${cmd}" verworfen (nicht verbunden).`);
+        return;
+    }
     try {
-        const fullCmd = cmd + "\r";
-        if (bleConnection.isNative && window.Capacitor?.Plugins?.BluetoothLe) {
+        const cleanCmd = String(cmd || "").trim();
+        const fullCmd = cleanCmd + "\r";
+        obdLog("tx", `TX (${(bleConnection.transport || "bt").toUpperCase()}): "${cleanCmd}\\r"`);
+
+        if (bleConnection.transport === "spp" && window.Capacitor?.Plugins?.ObdClassic) {
+            await window.Capacitor.Plugins.ObdClassic.writeSpp({ data: fullCmd });
+        } else if (bleConnection.isNative && window.Capacitor?.Plugins?.BluetoothLe) {
             const BlePlugin = window.Capacitor.Plugins.BluetoothLe;
             await BlePlugin.write({
                 deviceId: bleConnection.deviceId,
@@ -2861,24 +3242,44 @@ async function sendBleCommand(cmd) {
             await bleConnection.txChar.writeValue(data);
         }
     } catch (e) {
-        console.warn("Fehler beim Senden von", cmd, e);
+        obdLog("error", `Sende-Fehler bei "${cmd}": ${e?.message || e}`);
     }
 }
+
+window.sendManualObdCommand = async function(presetCmd) {
+    const inputEl = document.getElementById("obd-manual-cmd");
+    const cmd = presetCmd || (inputEl ? inputEl.value.trim() : "");
+    if (!cmd) {
+        showToast("Bitte einen AT- oder UDS-Befehl eingeben (z.B. ATZ).", "warning");
+        return;
+    }
+    if (!bleConnection.connected) {
+        obdLog("warn", `Manueller Befehl "${cmd}" nicht möglich: Bitte zuerst mit dem Dongle verbinden!`);
+        showToast("Bitte zuerst mit dem Dongle verbinden.", "warning");
+        return;
+    }
+    await sendBleCommand(cmd);
+    if (!presetCmd && inputEl) {
+        inputEl.value = "";
+    }
+};
 
 async function queryBornTelemetry() {
     if (!bleConnection.connected || bleConnection.commandLock) return;
     bleConnection.commandLock = true;
     try {
+        await sendBleCommand("ATRV");     // 12V Bordnetz direkt via ELM/vLinker
+        await new Promise(r => setTimeout(r, 220));
         await sendBleCommand("22 02 8C"); // Display SoC
-        await new Promise(r => setTimeout(r, 200));
+        await new Promise(r => setTimeout(r, 220));
         await sendBleCommand("22 02 8D"); // BMS SoC
-        await new Promise(r => setTimeout(r, 200));
+        await new Promise(r => setTimeout(r, 220));
         await sendBleCommand("22 02 8E"); // Batt Temp
-        await new Promise(r => setTimeout(r, 200));
-        await sendBleCommand("22 02 88"); // 12V Bordnetz Batterie
-        await new Promise(r => setTimeout(r, 200));
+        await new Promise(r => setTimeout(r, 220));
+        await sendBleCommand("22 02 88"); // 12V Bordnetz Batterie UDS
+        await new Promise(r => setTimeout(r, 220));
         await sendBleCommand("22 02 8A"); // Battery State of Health (SoH)
-        await new Promise(r => setTimeout(r, 200));
+        await new Promise(r => setTimeout(r, 220));
         await sendBleCommand("22 02 8F"); // Ladekabel / Stecker Status
     } finally {
         bleConnection.commandLock = false;
@@ -2886,7 +3287,12 @@ async function queryBornTelemetry() {
 }
 
 async function disconnectVlinkerBle() {
-    if (bleConnection.isNative && window.Capacitor?.Plugins?.BluetoothLe && bleConnection.deviceId) {
+    obdLog("info", "Trenne Verbindung zum OBD2-Dongle...");
+    if (bleConnection.transport === "spp" && window.Capacitor?.Plugins?.ObdClassic) {
+        try {
+            await window.Capacitor.Plugins.ObdClassic.disconnectSpp();
+        } catch (e) {}
+    } else if (bleConnection.isNative && window.Capacitor?.Plugins?.BluetoothLe && bleConnection.deviceId) {
         try {
             await window.Capacitor.Plugins.BluetoothLe.disconnect({ deviceId: bleConnection.deviceId });
         } catch (e) {}
@@ -2917,6 +3323,7 @@ function onBleDisconnected() {
     }
     bleConnection.connected = false;
     bleConnection.commandLock = false;
+    bleConnection.transport = null;
     bleConnection.device = null;
     bleConnection.server = null;
     bleConnection.rxChar = null;

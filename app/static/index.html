@@ -6,7 +6,7 @@
     <title>EV Charge Live Monitor</title>
     <!-- Leaflet CSS -->
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin=""/>
-    <link rel="stylesheet" href="static/style.css?v=13">
+    <link rel="stylesheet" href="static/style.css?v=14">
 </head>
 <body>
     <div class="app-container">
@@ -313,7 +313,29 @@
                         <span class="obd-title">⚡ Vgate vLinker FS Bluetooth</span>
                         <span id="obd-status-pill" class="badge badge-warning">Nicht verbunden</span>
                     </div>
-                    <p class="hint">Verbindet dein Smartphone direkt via Bluetooth LE mit dem vLinker FS am Diagnoseport des Cupra Born zur Echtzeit-Auslesung des Akkustands (UDS Service 0x22 / PID 02 8C).</p>
+                    <p class="hint">Verbindet dein Smartphone direkt via Bluetooth Classic (SPP/RFCOMM) oder BLE mit dem vLinker FS am Diagnoseport des Cupra Born zur Echtzeit-Auslesung (UDS Service 0x22 / PID 02 8C).</p>
+
+                    <div class="obd-device-picker">
+                        <div class="obd-picker-row">
+                            <label for="obd-device-select">Gekoppeltes Bluetooth-Gerät:</label>
+                            <button type="button" class="btn-obd-mini" onclick="refreshObdBondedDevices()" title="Gekoppelte Geräte neu laden">🔄 Neu suchen</button>
+                        </div>
+                        <select id="obd-device-select" class="obd-select">
+                            <option value="auto">⚡ Automatisch erkennen (vLinker / OBD)</option>
+                        </select>
+                        <div class="obd-picker-row" style="margin-top:6px;">
+                            <label for="obd-protocol-select">Verbindungs-Protokoll:</label>
+                            <select id="obd-protocol-select" class="obd-select-inline">
+                                <option value="auto" selected>Auto (Classic SPP ➔ BLE)</option>
+                                <option value="spp_auto">Classic SPP (Alle 4 RFCOMM-Modi)</option>
+                                <option value="spp_secure">Classic SPP (Secure RFCOMM)</option>
+                                <option value="spp_insecure">Classic SPP (Insecure RFCOMM)</option>
+                                <option value="spp_reflection">Classic SPP (Port 1 Reflection)</option>
+                                <option value="ble">Nur Bluetooth LE (GATT)</option>
+                            </select>
+                        </div>
+                    </div>
+
                     <div class="obd-actions">
                         <button type="button" id="btn-obd-connect" class="btn btn-primary">
                             <span class="btn-icon">📡</span> Mit vLinker Bluetooth verbinden
@@ -346,6 +368,35 @@
                         <div class="telemetry-item">
                             <div class="telemetry-label">Ladekabel / Stecker</div>
                             <div class="telemetry-value" id="obd-val-plug">--</div>
+                        </div>
+                    </div>
+
+                    <!-- Diagnose & Live-Logging Konsole -->
+                    <div class="obd-debug-wrapper">
+                        <div class="obd-debug-header" onclick="toggleObdDebugPanel()">
+                            <span>🛠️ Bluetooth &amp; OBD2 Diagnose-Log</span>
+                            <span id="obd-debug-toggle-label" class="obd-debug-badge">Anzeigen ▼</span>
+                        </div>
+                        <div id="obd-debug-panel" class="obd-debug-panel" style="display:block;">
+                            <div id="obd-diag-meta" class="obd-diag-meta">Prüfe Bluetooth-Treiber...</div>
+                            <div class="obd-debug-toolbar">
+                                <button type="button" class="btn-obd-mini" onclick="refreshObdBondedDevices()">🔍 Gekoppelte prüfen</button>
+                                <button type="button" class="btn-obd-mini" onclick="copyObdDebugLog()">📋 Log kopieren</button>
+                                <button type="button" class="btn-obd-mini" onclick="clearObdDebugLog()">🗑️ Leeren</button>
+                            </div>
+                            <div id="obd-debug-log" class="obd-debug-log"></div>
+                            <div class="obd-manual-cmd-row">
+                                <input type="text" id="obd-manual-cmd" placeholder="Manueller AT/UDS Befehl (z.B. ATZ, ATRV, 22028C)">
+                                <button type="button" class="btn-obd-mini btn-obd-send" onclick="sendManualObdCommand()">Senden</button>
+                            </div>
+                            <div class="obd-quick-chips">
+                                <button type="button" class="obd-chip" onclick="sendManualObdCommand('ATZ')">ATZ</button>
+                                <button type="button" class="obd-chip" onclick="sendManualObdCommand('ATI')">ATI</button>
+                                <button type="button" class="obd-chip" onclick="sendManualObdCommand('ATRV')">ATRV (12V)</button>
+                                <button type="button" class="obd-chip" onclick="sendManualObdCommand('ATSH 7E5')">ATSH 7E5</button>
+                                <button type="button" class="obd-chip" onclick="sendManualObdCommand('22 02 8C')">22028C (SoC)</button>
+                                <button type="button" class="obd-chip" onclick="sendManualObdCommand('22 02 8A')">22028A (SoH)</button>
+                            </div>
                         </div>
                     </div>
                 </div>
@@ -676,6 +727,6 @@
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
     <script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.min.js"></script>
     <script src="capacitor.js"></script>
-    <script src="static/app.js?v=14"></script>
+    <script src="static/app.js?v=15"></script>
 </body>
 </html>
