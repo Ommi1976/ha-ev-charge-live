@@ -1414,8 +1414,8 @@ window.toggleTariffModeUI = function() {
 // BUNDESWEITER LADETARIF-KATALOG (Git-Sync & Offline-Fallback)
 // ==========================================
 const DEFAULT_TARIFF_CATALOG = {
-    version: "1.3.3",
-    tariffs_updated_readable: "18.10.2026",
+    version: "1.3.8",
+    tariffs_updated_readable: "20.10.2026",
     cpo_tariffs: {
         stadtwerke_hockenheim: {
             keywords: ["stadtwerke", "hockenheim", "swh"],
@@ -1529,7 +1529,13 @@ function getTariffCatalog() {
         const cached = localStorage.getItem("ev_tariffs_catalog");
         if (cached) {
             const parsed = JSON.parse(cached);
-            if (parsed && parsed.cpo_tariffs && parsed.emp_tariffs) {
+            if (parsed && parsed.cpo_tariffs && parsed.emp_tariffs && parsed.version) {
+                // Falls der lokale Cache älter ist als der mitgelieferte Katalog (z.B. v1.3.3 vs v1.3.8), Cache bereinigen
+                const isOlder = String(parsed.version).localeCompare(String(DEFAULT_TARIFF_CATALOG.version), undefined, { numeric: true, sensitivity: 'base' }) < 0;
+                if (isOlder) {
+                    localStorage.setItem("ev_tariffs_catalog", JSON.stringify(DEFAULT_TARIFF_CATALOG));
+                    return DEFAULT_TARIFF_CATALOG;
+                }
                 return parsed;
             }
         }
@@ -1548,8 +1554,9 @@ async function syncRemoteTariffs(forceAlert = false) {
     };
 
     const sources = [
-        `https://raw.githubusercontent.com/stephanbiehl-afk/ha-ev-charge-live/master/tariffs.json?_t=${Date.now()}`,
-        `https://raw.githubusercontent.com/stephanbiehl-afk/ha-ev-charge-live/main/tariffs.json?_t=${Date.now()}`,
+        `https://raw.githubusercontent.com/Ommi1976/ha-ev-charge-live/master/tariffs.json?_t=${Date.now()}`,
+        `https://raw.githubusercontent.com/Ommi1976/ha-ev-charge-live/main/tariffs.json?_t=${Date.now()}`,
+        `static/tariffs.json?_t=${Date.now()}`,
         `tariffs.json?_t=${Date.now()}`
     ];
 
@@ -1583,10 +1590,10 @@ async function syncRemoteTariffs(forceAlert = false) {
         return downloadedData;
     } else {
         const active = getTariffCatalog();
-        const dateStr = active.tariffs_updated_readable || "18.10.2026";
-        updateUI(`Katalog (Lokal / Cache: ${dateStr})`, false);
+        const dateStr = active.tariffs_updated_readable || "20.10.2026";
+        updateUI(`Katalog v${active.version || "1.3.8"} (${dateStr})`, false);
         if (forceAlert) {
-            alert(`ℹ️ Keine Online-Verbindung zu GitHub.\nAktiver Offline-Katalog: Stand ${dateStr}`);
+            alert(`ℹ️ Keine Online-Verbindung zu GitHub.\nAktiver Offline-Katalog: v${active.version || "1.3.8"} (Stand ${dateStr})`);
         }
         return active;
     }

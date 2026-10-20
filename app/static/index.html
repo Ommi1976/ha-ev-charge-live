@@ -6,7 +6,7 @@
     <title>EV Charge Live Monitor</title>
     <!-- Leaflet CSS -->
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin=""/>
-    <link rel="stylesheet" href="static/style.css?v=14">
+    <link rel="stylesheet" href="static/style.css?v=15">
 </head>
 <body>
     <div class="app-container">
@@ -26,7 +26,10 @@
                 <div class="hud-left" id="btn-toggle-search-drawer">
                     <span class="logo-icon-mini">⚡</span>
                     <div class="location-display">
-                        <span id="hud-location-text" class="hud-location-title">Hockenheim</span>
+                        <div style="display:flex;align-items:center;">
+                            <span id="hud-location-text" class="hud-location-title">Hockenheim</span>
+                            <span class="badge-app-version" title="EV Charge Live Version">v1.3.8</span>
+                        </div>
                         <span id="hud-radius-text" class="hud-location-sub">5 km Umkreis ▾</span>
                     </div>
                 </div>
@@ -157,7 +160,7 @@
         <div class="modal-content">
             <div class="modal-drag-handle"></div>
             <div class="modal-header">
-                <h2>⚙️ Add-on Konfiguration</h2>
+                <h2>⚙️ Add-on Konfiguration <span class="badge-app-version">v1.3.8</span></h2>
                 <button class="btn-close" onclick="closeModal('modal-settings')">&times;</button>
             </div>
             <div class="modal-body">
@@ -255,8 +258,8 @@
                         <div style="display:flex; align-items:center; gap:8px;">
                             <span id="tariff-sync-dot" style="display:inline-block; width:9px; height:9px; border-radius:50%; background:#00e676; box-shadow:0 0 6px rgba(0,230,118,0.5);"></span>
                             <div>
-                                <div style="font-size:0.83rem; font-weight:600; color:var(--text-primary);" id="tariff-sync-text">Katalog: Bundesweit aktiv (Sync bereit)</div>
-                                <div style="font-size:0.72rem; color:var(--text-secondary);">Automatische Git-Aktualisierung beim Start</div>
+                                <div style="font-size:0.83rem; font-weight:600; color:var(--text-primary);" id="tariff-sync-text">Ladetarif-Katalog: v1.3.8 (20.10.2026)</div>
+                                <div style="font-size:0.72rem; color:var(--text-secondary);">Tarife via GitHub (Ommi1976/ha-ev-charge-live) &amp; Offline-Paket</div>
                             </div>
                         </div>
                         <button type="button" class="btn-secondary" style="padding:6px 10px; font-size:0.75rem; white-space:nowrap; border-radius:6px; cursor:pointer;" onclick="syncRemoteTariffs(true)">🔄 Sync prüfen</button>
@@ -304,7 +307,7 @@
         <div class="modal-content">
             <div class="modal-drag-handle"></div>
             <div class="modal-header">
-                <h2>🚗 Cupra Born &amp; vLinker OBD2</h2>
+                <h2>🚗 Cupra Born &amp; vLinker OBD2 <span class="badge-app-version">v1.3.8</span></h2>
                 <button class="btn-close" onclick="closeModal('modal-cupra-obd')">&times;</button>
             </div>
             <div class="modal-body">
@@ -727,6 +730,6 @@
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
     <script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.min.js"></script>
     <script src="capacitor.js"></script>
-    <script src="static/app.js?v=15"></script>
+    <script src="static/app.js?v=16"></script>
 </body>
 </html>

@@ -2,7 +2,7 @@ name: "EV Charge Live Monitor"
 slug: "ev_charge_live"
 description: "Echtzeit-Belegungsmonitor für E-Auto-Ladestationen (inkl. Stadtwerke Hockenheim) mit interaktiver Ingress-Karte, Favoriten und Push-Benachrichtigungen."
 version: "1.3.8"
-url: "https://github.com/stephanbiehl-afk/ha-ev-charge-live"
+url: "https://github.com/Ommi1976/ha-ev-charge-live"
 startup: "application"
 boot: "auto"
 arch:

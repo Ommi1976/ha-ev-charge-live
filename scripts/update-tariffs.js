@@ -14,7 +14,7 @@ async function fetchWithTimeout(url, timeoutMs = 6000) {
         const resp = await fetch(url, {
             signal: controller.signal,
             headers: {
-                'User-Agent': 'EV-Charge-Live-Monitor/1.3 (+https://github.com/stephanbiehl-afk/ha-ev-charge-live)',
+                'User-Agent': 'EV-Charge-Live-Monitor/1.3 (+https://github.com/Ommi1976/ha-ev-charge-live)',
                 'Accept': 'application/json, text/plain, */*'
             }
         });

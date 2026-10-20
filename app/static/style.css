@@ -2409,6 +2409,20 @@ body.amoled-mode .leaflet-popup-content-wrapper {
     vertical-align: middle;
 }
 
+.badge-app-version {
+    background: rgba(200, 122, 62, 0.22);
+    border: 1px solid var(--accent-color, #c87a3e);
+    color: #f59e0b;
+    font-size: 0.66rem;
+    font-weight: 700;
+    padding: 2px 7px;
+    border-radius: 12px;
+    vertical-align: middle;
+    margin-left: 6px;
+    letter-spacing: 0.3px;
+    display: inline-block;
+}
+
 .tariff-mode-selector {
     display: flex;
     flex-direction: column;
