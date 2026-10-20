@@ -636,6 +636,105 @@ async function fetchEnbwAreaWithUngrouping(fromLat, toLat, fromLon, toLon, depth
     return results;
 }
 
+// Deterministic EVSE Sort Key for consistent connector numbering (Ladepunkt 1, 2...)
+function getEvseSortKey(item) {
+    if (!item) return { isNum: false, num: 0, raw: "" };
+    const rawId = String(item.evse_id || item.evseId || item.uid || item.chargePointId || "");
+    const m = rawId.match(/(\d+)$/);
+    return {
+        isNum: Boolean(m),
+        num: m ? parseInt(m[1], 10) : 0,
+        raw: rawId
+    };
+}
+
+function compareEvseItems(a, b) {
+    const kA = getEvseSortKey(a);
+    const kB = getEvseSortKey(b);
+    if (kA.isNum && kB.isNum) {
+        if (kA.num !== kB.num) return kA.num - kB.num;
+    }
+    return kA.raw.localeCompare(kB.raw);
+}
+
+// Fetch single EnBW Station Details for real-time EVSE status & timestamps
+async function fetchEnbwStationDetail(stationId) {
+    if (!stationId) return null;
+    try {
+        const enbwUrl = `https://api.emp.emob-enbw.com/emobility-public-api/api/v1/chargestations/${stationId}`;
+        const resp = await nativeHttpFetch(enbwUrl, {
+            headers: {
+                "Ocp-Apim-Subscription-Key": "90a67b9900364009b588e100e4b1cc64",
+                "Origin": "https://www.enbw.com",
+                "Referer": "https://www.enbw.com/",
+                "User-Agent": "HomeAssistant-EVChargeLive/1.1",
+                "Accept": "application/json"
+            }
+        });
+        if (!resp.ok) return null;
+        return await resp.json();
+    } catch (e) {
+        return null;
+    }
+}
+
+// Parse EnBW ChargePoints deterministically with point labels and timestamps
+function parseEnbwChargePointsClient(chargePoints) {
+    if (!Array.isArray(chargePoints)) return [];
+    const sorted = [...chargePoints].sort(compareEvseItems);
+    const now = Date.now();
+    const connectors = [];
+
+    sorted.forEach((cp, idx) => {
+        const cpStatus = (cp.status || "AVAILABLE").toUpperCase();
+        const evseId = cp.evseId || cp.chargePointId || "";
+        const updatedAt = cp.state && cp.state.updatedAt ? cp.state.updatedAt : null;
+        let sinceTime = null;
+        let durStr = null;
+        let durMinutes = null;
+
+        if (updatedAt) {
+            try {
+                const dt = new Date(updatedAt);
+                const hh = String(dt.getHours()).padStart(2, '0');
+                const mm = String(dt.getMinutes()).padStart(2, '0');
+                sinceTime = `${hh}:${mm}`;
+                const diffMs = Math.max(0, now - updatedAt);
+                durMinutes = Math.floor(diffMs / 60000);
+                const h = Math.floor(durMinutes / 60);
+                const m = durMinutes % 60;
+                durStr = h > 0 ? `vor ${h} Std. ${m} Min.` : `vor ${m} Min.`;
+            } catch (e) {}
+        }
+
+        const pointLabel = `Ladepunkt ${idx + 1}`;
+        const rawConns = cp.connectors && cp.connectors.length > 0 ? cp.connectors : [{}];
+        rawConns.forEach(conn => {
+            let plug = conn.plugTypeName || conn.chargePlugTypeGroup || "Typ 2";
+            if (/type_2|typ 2/i.test(plug)) plug = "Typ 2";
+            else if (/ccs/i.test(plug)) plug = "CCS";
+            else if (/chademo/i.test(plug)) plug = "CHAdeMO";
+            else if (/schuko/i.test(plug)) plug = "Schuko";
+
+            const power = Math.round((conn.maxPowerInKw || 22.0) * 10) / 10;
+            connectors.push({
+                point_label: pointLabel,
+                point_index: idx + 1,
+                standard: plug,
+                power_kw: power,
+                power_type: power <= 43 ? "AC" : "DC",
+                status: cpStatus,
+                evse_id: evseId,
+                updated_at: updatedAt,
+                since_time: sinceTime,
+                duration_str: durStr,
+                duration_minutes: durMinutes
+            });
+        });
+    });
+    return connectors;
+}
+
 // Standalone Direct Client for APK
 async function searchStationsDirectClient(city, postalCode, lat, lon, radius) {
     try {
@@ -680,12 +779,15 @@ async function searchStationsDirectClient(city, postalCode, lat, lon, radius) {
                 item.charging_pool.forEach(p => { if (p.evses) evses.push(...p.evses); });
             }
 
+            // Sort EVSEs deterministically (Ladepunkt 1, 2...)
+            evses.sort(compareEvseItems);
+
             let total = evses.length || 2;
             let free = 0;
             let occupied = 0;
             let connectors = [];
 
-            evses.forEach(evse => {
+            evses.forEach((evse, evseIdx) => {
                 const st = (evse.status || "AVAILABLE").toUpperCase();
                 const isFree = (st === "AVAILABLE" || st === "FREE" || st === "STATIC" || st === "OPERATIVE");
                 if (isFree) free++;
@@ -697,6 +799,9 @@ async function searchStationsDirectClient(city, postalCode, lat, lon, radius) {
                     if (std.includes("T2_COMBO") || std.includes("CCS")) std = "CCS";
                     else if (std.includes("T2")) std = "Typ 2";
                     connectors.push({
+                        point_label: `Ladepunkt ${evseIdx + 1}`,
+                        point_index: evseIdx + 1,
+                        evse_id: evse.evse_id || evse.uid,
                         standard: std,
                         power_kw: pKw,
                         power_type: conn.power_type || (pKw > 22 ? "DC" : "AC"),
@@ -769,10 +874,15 @@ async function searchStationsDirectClient(city, postalCode, lat, lon, radius) {
                                 st.occupied_slots = Math.max(0, tot - fr);
                                 st.live_source = "EnBW Echtzeit (Direkt)";
                                 st.status = fr === tot ? "AVAILABLE" : (fr === 0 ? "OCCUPIED" : "PARTIAL");
+                                if (bestMatch.stationId) {
+                                    st.enbw_station_id = bestMatch.stationId;
+                                }
                                 if (st.connectors && st.connectors.length > 0) {
-                                    st.connectors.forEach((c, idx) => {
-                                        c.status = idx < st.occupied_slots ? "OCCUPIED" : "AVAILABLE";
-                                    });
+                                    if (fr === tot) {
+                                        st.connectors.forEach(c => { c.status = "AVAILABLE"; });
+                                    } else if (fr === 0) {
+                                        st.connectors.forEach(c => { c.status = "OCCUPIED"; });
+                                    }
                                 }
                                 // Save in direct cache for 5 min grace
                                 window._directStateCache = window._directStateCache || new Map();
@@ -782,6 +892,7 @@ async function searchStationsDirectClient(city, postalCode, lat, lon, radius) {
                                     total_slots: st.total_slots,
                                     status: st.status,
                                     connectors: st.connectors,
+                                    enbw_station_id: st.enbw_station_id,
                                     time: Date.now()
                                 });
                             } else if (window._directStateCache && window._directStateCache.has(st.id)) {
@@ -792,10 +903,33 @@ async function searchStationsDirectClient(city, postalCode, lat, lon, radius) {
                                     st.total_slots = cached.total_slots;
                                     st.status = cached.status;
                                     st.connectors = cached.connectors;
+                                    st.enbw_station_id = cached.enbw_station_id || st.enbw_station_id;
                                     st.live_source = "EnBW Echtzeit (Puffer)";
                                 }
                             }
                         });
+
+                        // Enrich favorite stations with exact per-EVSE timestamps if matched
+                        const matchedFavs = stations.filter(s => s.is_favorite && s.enbw_station_id);
+                        if (matchedFavs.length > 0) {
+                            await Promise.all(matchedFavs.map(async (fst) => {
+                                try {
+                                    const det = await fetchEnbwStationDetail(fst.enbw_station_id);
+                                    if (det && det.chargePoints) {
+                                        const parsed = parseEnbwChargePointsClient(det.chargePoints);
+                                        if (parsed && parsed.length > 0) {
+                                            fst.connectors = parsed;
+                                            const fCount = parsed.filter(c => c.status === "AVAILABLE" || c.status === "FREE").length;
+                                            const tCount = parsed.length;
+                                            fst.total_slots = tCount;
+                                            fst.free_slots = fCount;
+                                            fst.occupied_slots = Math.max(0, tCount - fCount);
+                                            fst.status = fCount === tCount ? "AVAILABLE" : (fCount === 0 ? "OCCUPIED" : "PARTIAL");
+                                        }
+                                    }
+                                } catch (e) {}
+                            }));
+                        }
                     }
                 }
             } catch (enbwErr) {
@@ -1003,24 +1137,26 @@ function buildStationDetailBodyHtml(st) {
     else if (st.free_slots === 0) statusBadgeClass = "badge-danger";
     else if (st.free_slots < st.total_slots) statusBadgeClass = "badge-warning";
 
-    const connectorsHtml = (st.connectors || []).map(c => {
+    const connectorsHtml = (st.connectors || []).map((c, idx) => {
         let statusBadge = "";
         const sinceTime = escapeHtml(c.since_time);
         const durStr = escapeHtml(c.duration_str);
-        if (c.status === "OCCUPIED") {
-            const timeInfo = sinceTime ? ` seit ${sinceTime} Uhr (${durStr})` : "";
+        if (c.status === "OCCUPIED" || c.status === "CHARGING") {
+            const timeInfo = sinceTime ? ` seit ${sinceTime} Uhr${durStr ? ` (${durStr})` : ''}` : (durStr ? ` (${durStr})` : '');
             statusBadge = `<span class="badge-occupied">⛔ Belegt${timeInfo}</span>`;
-        } else if (c.status === "AVAILABLE") {
+        } else if (c.status === "AVAILABLE" || c.status === "FREE") {
             const timeInfo = sinceTime ? ` seit ${sinceTime} Uhr` : "";
             statusBadge = `<span class="badge-available">✅ Frei${timeInfo}</span>`;
         } else {
             statusBadge = `<span class="badge-occupied">⚠️ ${escapeHtml(c.status || 'Unbekannt')}</span>`;
         }
+        const lpLabel = c.point_label || (st.connectors.length > 1 ? `Ladepunkt ${idx + 1}` : '');
+        const titleText = lpLabel ? `${lpLabel} · ${c.standard}` : c.standard;
         return `
             <li>
                 <div class="connector-row">
                     <div class="conn-header">
-                        <span class="conn-title">⚡ ${escapeHtml(c.standard)}</span>
+                        <span class="conn-title">⚡ ${escapeHtml(titleText)}</span>
                         <span style="font-weight:700;color:var(--text-primary);">${escapeHtml(c.power_kw)} kW (${escapeHtml(c.power_type)})</span>
                     </div>
                     <div>${statusBadge}</div>
@@ -1229,6 +1365,28 @@ window.openStationDetailSheet = function(st) {
         }
 
         openModal("modal-station-detail");
+
+        // Background live refresh if EnBW station ID is available to get exact per-EVSE connector durations
+        if (st.enbw_station_id) {
+            fetchEnbwStationDetail(st.enbw_station_id).then(det => {
+                if (det && det.chargePoints) {
+                    const conns = parseEnbwChargePointsClient(det.chargePoints);
+                    if (conns && conns.length > 0) {
+                        st.connectors = conns;
+                        const fr = conns.filter(c => c.status === "AVAILABLE" || c.status === "FREE").length;
+                        const tot = conns.length;
+                        st.total_slots = tot;
+                        st.free_slots = fr;
+                        st.occupied_slots = Math.max(0, tot - fr);
+                        st.status = fr === tot ? "AVAILABLE" : (fr === 0 ? "OCCUPIED" : "PARTIAL");
+                        const currentBody = document.getElementById("sheet-station-body");
+                        if (currentBody && window.currentSheetStation && String(window.currentSheetStation.id) === String(st.id)) {
+                            currentBody.innerHTML = buildStationDetailBodyHtml(st);
+                        }
+                    }
+                }
+            }).catch(() => {});
+        }
     } catch (err) {
         console.error("Fehler beim Öffnen der Stationsdetails:", err);
         showToast("Fehler beim Laden der Stationsdetails: " + (err.message || err), "error");
@@ -1862,11 +2020,24 @@ function renderFavoritesModal() {
 
         const safeJsId = escapeJsString(f.id);
         const watched = isWatched(f.id);
+        const connLineHtml = (f.connectors && f.connectors.length > 0) ? `
+            <div style="font-size: 0.72rem; margin-top: 4px; display: flex; gap: 8px; flex-wrap: wrap;">
+                ${f.connectors.map((c, i) => {
+                    const isFree = (c.status === 'AVAILABLE' || c.status === 'FREE');
+                    const lp = c.point_label || `LP ${i + 1}`;
+                    const dur = !isFree && c.duration_str ? ` (${c.duration_str})` : '';
+                    const color = isFree ? '#10b981' : '#f87171';
+                    return `<span style="color: ${color}; font-weight: 600;">${isFree ? '✅' : '⛔'} ${escapeHtml(lp)}${escapeHtml(dur)}</span>`;
+                }).join("")}
+            </div>
+        ` : '';
+
         return `
             <div class="favorite-card">
                 <div class="favorite-info" style="cursor:pointer;" onclick="openStationDetailSheetById('${safeJsId}')" title="Details öffnen">
                     <h4>${escapeHtml(f.name)}</h4>
                     <div class="sub">${escapeHtml(f.operator)} &bull; ${escapeHtml(f.address)}</div>
+                    ${connLineHtml}
                 </div>
                 <div class="favorite-actions">
                     <span class="badge ${statusBadge}">${Number(f.free_slots || 0)} / ${Number(f.total_slots || 0)} frei</span>
@@ -2468,7 +2639,7 @@ window.clearObdDebugLog = function() {
 window.copyObdDebugLog = async function() {
     const metaEl = document.getElementById("obd-diag-meta");
     const header = [
-        "=== EV Charge Live OBD2 Diagnose-Protokoll (v1.3.9) ===",
+        "=== EV Charge Live OBD2 Diagnose-Protokoll (v1.3.10) ===",
         `Zeitpunkt: ${new Date().toISOString()}`,
         `Treiber-Info: ${metaEl ? metaEl.textContent : "n/a"}`,
         `Verbindungsstatus: connected=${bleConnection.connected}, transport=${bleConnection.transport || "none"}, deviceId=${bleConnection.deviceId || "none"}`,

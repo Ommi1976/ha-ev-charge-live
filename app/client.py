@@ -76,6 +76,18 @@ def format_timestamp_duration(updated_at_ms: Optional[int]) -> Tuple[Optional[st
         return None, None, None
 
 
+def extract_evse_sort_key(item: Dict[str, Any]) -> Tuple[int, Any, str]:
+    """Deterministically extracts a sort key for EVSE / ChargePoints to keep Ladepunkt 1, 2, etc. in fixed order."""
+    raw_id = str(item.get("evse_id") or item.get("evseId") or item.get("uid") or item.get("chargePointId") or "")
+    m = re.search(r"(\d+)$", raw_id)
+    if m:
+        try:
+            return (0, int(m.group(1)), raw_id)
+        except ValueError:
+            pass
+    return (1, 0, raw_id)
+
+
 class EVChargeClient:
     def __init__(self, timeout: float = 15.0) -> None:
         self.timeout = timeout
@@ -319,13 +331,16 @@ class EVChargeClient:
         if not evses and item.get("evses"):
             evses = item.get("evses", [])
 
+        # Deterministic sorting so Ladepunkt 1 (Links) and Ladepunkt 2 (Rechts) never swap
+        evses.sort(key=extract_evse_sort_key)
+
         total_slots = len(evses)
         free_slots = 0
         occupied_slots = 0
         out_of_order_slots = 0
         connectors_info = []
 
-        for evse in evses:
+        for evse_idx, evse in enumerate(evses):
             status = (evse.get("status") or "UNKNOWN").upper()
             if status in ("AVAILABLE", "FREE"):
                 free_slots += 1
@@ -355,6 +370,9 @@ class EVChargeClient:
                     power_w = 0.0
                 power_kw = round(power_w / 1000.0, 1) if power_w > 0 else 22.0
                 connectors_info.append({
+                    "point_label": f"Ladepunkt {evse_idx + 1}",
+                    "point_index": evse_idx + 1,
+                    "evse_id": evse.get("evse_id") or evse.get("uid"),
                     "standard": standard_clean,
                     "power_kw": power_kw,
                     "power_type": conn.get("power_type", "AC"),
@@ -580,12 +598,14 @@ class EVChargeClient:
 
     def _parse_enbw_charge_points(self, charge_points: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """Parses charge points with exact kW, EVSE ID, status, since_time, and duration_str."""
+        sorted_cps = sorted(charge_points, key=extract_evse_sort_key)
         connectors = []
-        for cp in charge_points:
+        for idx, cp in enumerate(sorted_cps):
             cp_status = cp.get("status", "AVAILABLE").upper()
             evse_id = cp.get("evseId")
             updated_at = cp.get("state", {}).get("updatedAt")
             since_time, duration_str, duration_mins = format_timestamp_duration(updated_at)
+            point_label = f"Ladepunkt {idx + 1}"
 
             for conn in cp.get("connectors", []):
                 plug = conn.get("plugTypeName") or conn.get("chargePlugTypeGroup") or "Typ 2"
@@ -599,6 +619,8 @@ class EVChargeClient:
                     plug = "Schuko"
                 power = round(conn.get("maxPowerInKw") or 22.0, 1)
                 connectors.append({
+                    "point_label": point_label,
+                    "point_index": idx + 1,
                     "standard": plug,
                     "power_kw": power,
                     "power_type": "AC" if power <= 43 else "DC",

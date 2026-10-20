@@ -226,8 +226,8 @@ class SyncWorker:
             state = "Teilweise belegt"
 
         connectors_summary = [
-            f"{c.get('standard')} ({c.get('power_kw')} kW)"
-            for c in station.get("connectors") or [] if isinstance(c, dict)
+            f"{c.get('point_label') or f'LP {idx + 1}'}: {c.get('standard')} {c.get('power_kw')} kW ({'Frei' if c.get('status') in ('AVAILABLE', 'FREE') else 'Belegt'})"
+            for idx, c in enumerate(station.get("connectors") or []) if isinstance(c, dict)
         ]
 
         attributes = {
