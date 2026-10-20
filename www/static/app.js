@@ -1410,6 +1410,21 @@ window.toggleTariffModeUI = function() {
     }
 };
 
+window.switchSettingsTab = function(tabName) {
+    document.querySelectorAll(".settings-tab-btn").forEach(b => b.classList.remove("active"));
+    document.querySelectorAll(".settings-tab-pane").forEach(p => {
+        p.classList.remove("active");
+        p.style.display = "none";
+    });
+    const activeBtn = document.getElementById(`settings-tab-btn-${tabName}`);
+    const activePane = document.getElementById(`settings-tab-${tabName}`);
+    if (activeBtn) activeBtn.classList.add("active");
+    if (activePane) {
+        activePane.classList.add("active");
+        activePane.style.display = "block";
+    }
+};
+
 // ==========================================
 // BUNDESWEITER LADETARIF-KATALOG (Git-Sync & Offline-Fallback)
 // ==========================================
