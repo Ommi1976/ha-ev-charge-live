@@ -36,6 +36,40 @@ def _as_float(value: Any, default: float = 0.0) -> float:
         return default
 
 
+def calculate_blocking_deadline(
+    start_dt: datetime.datetime,
+    free_minutes: int,
+    night_start_hour: int = 21,
+    night_end_hour: int = 9
+) -> datetime.datetime:
+    """Calculates the exact deadline when blocking fees start, taking night exemption into account."""
+    curr = start_dt
+    remaining_mins = max(0, free_minutes)
+    if remaining_mins <= 0:
+        return curr
+
+    while remaining_mins > 0:
+        h = curr.hour
+        is_night = (h >= night_start_hour or h < night_end_hour) if night_start_hour > night_end_hour else (night_start_hour <= h < night_end_hour)
+        if is_night:
+            if h >= night_start_hour:
+                next_day = (curr + datetime.timedelta(days=1)).date()
+                curr = datetime.datetime.combine(next_day, datetime.time(night_end_hour, 0), tzinfo=curr.tzinfo)
+            else:
+                curr = datetime.datetime.combine(curr.date(), datetime.time(night_end_hour, 0), tzinfo=curr.tzinfo)
+        else:
+            night_start_today = datetime.datetime.combine(curr.date(), datetime.time(night_start_hour, 0), tzinfo=curr.tzinfo)
+            mins_until_night = int((night_start_today - curr).total_seconds() / 60)
+            if remaining_mins <= mins_until_night:
+                curr = curr + datetime.timedelta(minutes=remaining_mins)
+                remaining_mins = 0
+            else:
+                remaining_mins -= mins_until_night
+                curr = night_start_today
+
+    return curr
+
+
 def slugify(text: str) -> str:
     """Transforms a string into a safe entity_id component."""
     text = text.lower()
@@ -79,6 +113,7 @@ class SyncWorker:
         while self._running:
             try:
                 await self.sync_favorites()
+                await self.check_charge_session()
             except asyncio.CancelledError:
                 break
             except Exception as err:
@@ -291,6 +326,156 @@ class SyncWorker:
                     await client.post(f"{SUPERVISOR_URL}/states/{tracker_id}", json=tracker_payload, headers=headers)
             except Exception as err:
                 _LOGGER.debug("Could not update device tracker: %s", err)
+
+    async def check_charge_session(self) -> None:
+        """Evaluates active smart charge session, sends warnings (20m, 5m, fee, SoC) and updates HA sensor."""
+        session = storage.load_charge_session()
+        config = storage.load_config()
+
+        if not session:
+            if getattr(self, "_last_session_active", False):
+                self._last_session_active = False
+                await self._push_session_to_home_assistant(None, config)
+            return
+
+        self._last_session_active = True
+        now = datetime.datetime.now(tz=BERLIN_TZ)
+        now_ms = int(now.timestamp() * 1000)
+
+        start_ms = session.get("start_time_ms") or now_ms
+        try:
+            start_dt = datetime.datetime.fromtimestamp(start_ms / 1000.0, tz=BERLIN_TZ)
+        except Exception:
+            start_dt = now
+
+        free_mins = int(session.get("free_parking_minutes", 240))
+        night_start = int(session.get("night_window_start", 21))
+        night_end = int(session.get("night_window_end", 9))
+        has_night = session.get("has_night_rule", True)
+
+        if has_night:
+            deadline = calculate_blocking_deadline(start_dt, free_mins, night_start, night_end)
+        else:
+            deadline = start_dt + datetime.timedelta(minutes=free_mins)
+
+        diff_sec = (deadline - now).total_seconds()
+        rem_mins = int(diff_sec / 60)
+
+        h = now.hour
+        is_night = (h >= night_start or h < night_end) if has_night else False
+
+        if rem_mins <= 0:
+            state = "Blockiergebühr aktiv"
+        elif is_night:
+            state = "Nachtpause (Frei)"
+        elif rem_mins <= 5:
+            state = "Dringend (5 Min)"
+        elif rem_mins <= 20:
+            state = "Warnung (20 Min)"
+        else:
+            state = "Frei laden"
+
+        # 1. Target SoC notification
+        target_reached_ms = session.get("target_reached_ms")
+        if target_reached_ms and now_ms >= target_reached_ms and not session.get("notified_soc"):
+            session["notified_soc"] = True
+            storage.save_charge_session(session)
+            await notifier.notify_charge_guardian(session, "target_soc", config)
+
+        # 2. Blocking fee pre-warnings
+        if not is_night:
+            if rem_mins <= 20 and rem_mins > 5 and not session.get("notified_20"):
+                session["notified_20"] = True
+                storage.save_charge_session(session)
+                await notifier.notify_charge_guardian(session, "warning_20", config)
+            elif rem_mins <= 5 and rem_mins > 0 and not session.get("notified_5"):
+                session["notified_5"] = True
+                storage.save_charge_session(session)
+                await notifier.notify_charge_guardian(session, "warning_5", config)
+            elif rem_mins <= 0 and not session.get("notified_fee"):
+                session["notified_fee"] = True
+                storage.save_charge_session(session)
+                await notifier.notify_charge_guardian(session, "fee_active", config)
+
+        session["remaining_minutes"] = max(0, rem_mins)
+        session["deadline_iso"] = deadline.isoformat()
+        session["deadline_str"] = deadline.strftime("%H:%M")
+        session["is_night_paused"] = is_night
+        session["state"] = state
+        storage.save_charge_session(session)
+
+        await self._push_session_to_home_assistant(session, config)
+
+    async def _push_session_to_home_assistant(
+        self,
+        session: Optional[Dict[str, Any]],
+        config: Dict[str, Any]
+    ) -> None:
+        """Pushes active charging session to sensor.ev_charge_session in Home Assistant."""
+        if not self._token:
+            return
+
+        ha_cfg = config.get("home_assistant_integration", {})
+        prefix = str(ha_cfg.get("entity_prefix") or "sensor.ev_charge_")
+        if not SAFE_PREFIX_RE.match(prefix):
+            prefix = "sensor.ev_charge_"
+        entity_id = f"{prefix}session"
+
+        if not session:
+            payload = {
+                "state": "Inaktiv",
+                "attributes": {
+                    "friendly_name": "EV Charge Live: Lade-Wächter",
+                    "icon": "mdi:ev-station",
+                    "station_name": None,
+                    "remaining_minutes": 0,
+                    "is_active": False,
+                    "last_synced": datetime.datetime.now(tz=BERLIN_TZ).isoformat()
+                }
+            }
+        else:
+            state = session.get("state", "Frei laden")
+            rem_mins = session.get("remaining_minutes", 0)
+            is_night = session.get("is_night_paused", False)
+            if rem_mins <= 0:
+                icon = "mdi:alert-octagon"
+            elif rem_mins <= 20:
+                icon = "mdi:timer-alert"
+            elif is_night:
+                icon = "mdi:weather-night"
+            else:
+                icon = "mdi:battery-charging"
+
+            payload = {
+                "state": state,
+                "attributes": {
+                    "friendly_name": f"Lade-Wächter: {session.get('station_name')}",
+                    "icon": icon,
+                    "station_name": session.get("station_name"),
+                    "station_id": session.get("station_id"),
+                    "connector_label": session.get("connector_label"),
+                    "remaining_minutes": rem_mins,
+                    "deadline": session.get("deadline_str"),
+                    "deadline_iso": session.get("deadline_iso"),
+                    "is_night_paused": is_night,
+                    "target_soc": session.get("target_soc"),
+                    "target_soc_eta_str": session.get("target_soc_eta_str"),
+                    "blocking_fee_per_min": session.get("blocking_fee_per_min", 0.10),
+                    "is_active": True,
+                    "last_synced": datetime.datetime.now(tz=BERLIN_TZ).isoformat()
+                }
+            }
+
+        url = f"{SUPERVISOR_URL}/states/{entity_id}"
+        headers = {
+            "Authorization": f"Bearer {self._token}",
+            "Content-Type": "application/json"
+        }
+        try:
+            async with httpx.AsyncClient(timeout=8.0) as client:
+                await client.post(url, json=payload, headers=headers)
+        except Exception as err:
+            _LOGGER.debug("Failed to push session sensor to Home Assistant: %s", err)
 
 
 poller = SyncWorker()

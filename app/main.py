@@ -327,6 +327,39 @@ async def trigger_sync() -> Dict[str, Any]:
     return {"status": "success", "count": len(storage.load_favorites())}
 
 
+@app.get("/api/charge-session")
+async def get_charge_session() -> Dict[str, Any]:
+    """Returns the current active charging session (Lade-Wächter)."""
+    session = storage.load_charge_session()
+    return {"status": "success", "session": session}
+
+
+@app.post("/api/charge-session/start")
+async def start_charge_session(session_data: Dict[str, Any]) -> Dict[str, Any]:
+    """Starts or updates the active charging session with blocking fee and target SoC monitoring."""
+    try:
+        now_ms = int(datetime.datetime.now().timestamp() * 1000)
+        session_data["start_time_ms"] = session_data.get("start_time_ms") or now_ms
+        storage.save_charge_session(session_data)
+        _spawn_background(poller.check_charge_session())
+        return {"status": "success", "session": session_data}
+    except Exception as err:
+        _LOGGER.error("Failed to start charge session: %s", err, exc_info=True)
+        raise HTTPException(status_code=500, detail="Internal error")
+
+
+@app.post("/api/charge-session/stop")
+async def stop_charge_session() -> Dict[str, Any]:
+    """Stops and clears the active charging session."""
+    try:
+        storage.clear_charge_session()
+        _spawn_background(poller.check_charge_session())
+        return {"status": "success"}
+    except Exception as err:
+        _LOGGER.error("Failed to stop charge session: %s", err, exc_info=True)
+        raise HTTPException(status_code=500, detail="Internal error")
+
+
 @app.post("/api/send-to-cupra")
 async def send_to_cupra_endpoint(payload: Dict[str, Any]) -> Dict[str, Any]:
     """Emits navigation destination event on Home Assistant eventbus and sends notification to car/phone."""

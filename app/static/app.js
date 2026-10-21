@@ -1319,7 +1319,9 @@ function buildStationDetailBodyHtml(st) {
             </button>
         </div>
         <div class="popup-extra-actions">
-            <button class="btn-extra" onclick="startParkTimer(${feeInfo.timerMinutes}, '${safeJsName}')">⏱️ Timer (${feeInfo.timerMinutes >= 60 ? (feeInfo.timerMinutes / 60) + ' Std.' : feeInfo.timerMinutes + ' Min.'})</button>
+            <button class="btn-extra" onclick="startSmartChargeGuardianFromSheet()" style="background:linear-gradient(135deg, rgba(235,106,56,0.25), rgba(16,185,129,0.2));border:1px solid var(--cupra-copper);color:var(--text-primary);font-weight:700;">
+                🛡️ Lade-Wächter (${feeInfo.timerMinutes >= 60 ? (feeInfo.timerMinutes / 60) + ' Std.' : feeInfo.timerMinutes + ' Min.'} + ${targetSoc}%)
+            </button>
             <button class="btn-extra" onclick="markParkedCar('${safeJsName}', ${lat}, ${lon})">🅿️ Hier geparkt</button>
         </div>
         <div class="popup-extra-actions" style="margin-top:6px;">
@@ -1434,6 +1436,10 @@ function getBlockingFeeInfo(operator, hasDc) {
         return {
             title: "Stadtwerke Hockenheim",
             freeMinutes: 240,
+            feePerMinute: 0.10,
+            nightStart: 20,
+            nightEnd: 8,
+            hasNightRule: true,
             summary: "Ab 240 Min. (4 Std.) 0,10 €/Min. Tagsüber Parkscheibe (3–4 Std.) beachten.",
             nightRule: "🌙 Nachts (20:00 – 08:00 Uhr) ohne Blockiergebühr.",
             timerMinutes: 240
@@ -1445,6 +1451,10 @@ function getBlockingFeeInfo(operator, hasDc) {
             return {
                 title: "EnBW mobility+ (DC)",
                 freeMinutes: 45,
+                feePerMinute: 0.10,
+                nightStart: 21,
+                nightEnd: 9,
+                hasNightRule: false,
                 summary: "Ab 45 Min. Standzeit 0,10 €/Min. (Gedeckelt auf max. 12,00 € pro Vorgang).",
                 nightRule: "⚠️ Gilt rund um die Uhr (auch nachts).",
                 timerMinutes: 45
@@ -1453,8 +1463,12 @@ function getBlockingFeeInfo(operator, hasDc) {
             return {
                 title: "EnBW mobility+ (AC)",
                 freeMinutes: 240,
+                feePerMinute: 0.10,
+                nightStart: 21,
+                nightEnd: 9,
+                hasNightRule: true,
                 summary: "Ab 240 Min. (4 Std.) Standzeit 0,10 €/Min. (Gedeckelt auf max. 12,00 €).",
-                nightRule: "⚠️ Gilt rund um die Uhr (auch nachts).",
+                nightRule: "🌙 Nachts (21:00 – 09:00 Uhr) ohne Blockiergebühr.",
                 timerMinutes: 240
             };
         }
@@ -1464,6 +1478,10 @@ function getBlockingFeeInfo(operator, hasDc) {
         return {
             title: "IONITY High Power",
             freeMinutes: 60,
+            feePerMinute: 0.20,
+            nightStart: 21,
+            nightEnd: 9,
+            hasNightRule: false,
             summary: "Ab 60 Min. Standzeit 0,20 €/Min. Blockiergebühr.",
             nightRule: "⚠️ Rund um die Uhr aktiv.",
             timerMinutes: 60
@@ -1474,6 +1492,10 @@ function getBlockingFeeInfo(operator, hasDc) {
         return {
             title: "Aral pulse (DC)",
             freeMinutes: 45,
+            feePerMinute: 0.10,
+            nightStart: 21,
+            nightEnd: 9,
+            hasNightRule: false,
             summary: "Ab 45 Min. Standzeit 0,10 €/Min. (max. 12,00 € Deckel).",
             nightRule: "⚠️ Rund um die Uhr aktiv.",
             timerMinutes: 45
@@ -1484,6 +1506,10 @@ function getBlockingFeeInfo(operator, hasDc) {
         return {
             title: "Tesla Supercharger",
             freeMinutes: 0,
+            feePerMinute: 0.50,
+            nightStart: 21,
+            nightEnd: 9,
+            hasNightRule: false,
             summary: "Supercharger: 0,50–1,00 €/Min. Blockiergebühr unmittelbar nach Ladeende (100% voll).",
             nightRule: "⚠️ Rund um die Uhr aktiv.",
             timerMinutes: 30
@@ -1494,6 +1520,10 @@ function getBlockingFeeInfo(operator, hasDc) {
         return {
             title: "Shell Recharge",
             freeMinutes: hasDc ? 45 : 240,
+            feePerMinute: 0.10,
+            nightStart: 21,
+            nightEnd: 9,
+            hasNightRule: !hasDc,
             summary: hasDc ? "DC Schnelllader: Standgebühr ab 45 Min. (0,10 €/Min.)." : "AC: Standgebühr ab 240 Min. (4 Std.) 0,10 €/Min.",
             nightRule: "🌙 Bei AC nachts (21:00–09:00 Uhr) oft frei.",
             timerMinutes: hasDc ? 45 : 240
@@ -1504,6 +1534,10 @@ function getBlockingFeeInfo(operator, hasDc) {
         return {
             title: "ALDI SÜD Filial-Ladepunkt",
             freeMinutes: 60,
+            feePerMinute: 0.10,
+            nightStart: 21,
+            nightEnd: 9,
+            hasNightRule: false,
             summary: "Kundenparkplatz: Max. 60–90 Min. Parkzeit während des Einkaufs mit Parkscheibe.",
             nightRule: "⚠️ Außerhalb der Öffnungszeiten meist geschlossen.",
             timerMinutes: 60
@@ -1514,6 +1548,10 @@ function getBlockingFeeInfo(operator, hasDc) {
         return {
             title: "Wirelane",
             freeMinutes: 240,
+            feePerMinute: 0.10,
+            nightStart: 22,
+            nightEnd: 8,
+            hasNightRule: true,
             summary: "AC: Ab 240 Min. (4 Std.) Standzeitzuschlag von 0,10 €/Min.",
             nightRule: "🌙 Nachts (22:00–08:00 Uhr) gebührenfrei.",
             timerMinutes: 240
@@ -1525,6 +1563,10 @@ function getBlockingFeeInfo(operator, hasDc) {
         return {
             title: "DC Schnelllader",
             freeMinutes: 45,
+            feePerMinute: 0.10,
+            nightStart: 21,
+            nightEnd: 9,
+            hasNightRule: false,
             summary: "DC Schnelllader: Standgebühr meist ab 45–60 Min. (ca. 0,10–0,15 €/Min.).",
             nightRule: "Je nach Ladekarte / Roaming-Tarif.",
             timerMinutes: 45
@@ -1533,6 +1575,10 @@ function getBlockingFeeInfo(operator, hasDc) {
         return {
             title: "AC Normallader",
             freeMinutes: 240,
+            feePerMinute: 0.10,
+            nightStart: 21,
+            nightEnd: 9,
+            hasNightRule: true,
             summary: "AC Normallader: Standgebühr meist ab 240 Min. (4 Std.) ca. 0,10 €/Min.",
             nightRule: "🌙 Viele Roaming-Tarife nachts (21:00 – 08:00 Uhr) gebührenfrei.",
             timerMinutes: 240
@@ -2639,7 +2685,7 @@ window.clearObdDebugLog = function() {
 window.copyObdDebugLog = async function() {
     const metaEl = document.getElementById("obd-diag-meta");
     const header = [
-        "=== EV Charge Live OBD2 Diagnose-Protokoll (v1.3.10) ===",
+        "=== EV Charge Live OBD2 Diagnose-Protokoll (v1.3.11) ===",
         `Zeitpunkt: ${new Date().toISOString()}`,
         `Treiber-Info: ${metaEl ? metaEl.textContent : "n/a"}`,
         `Verbindungsstatus: connected=${bleConnection.connected}, transport=${bleConnection.transport || "none"}, deviceId=${bleConnection.deviceId || "none"}`,
@@ -3390,9 +3436,23 @@ function handleAutoPlugEvent(prev, current) {
     if (prev !== "charging" && current === "charging") {
         cupraState.chargeSessionStartSoc = getActiveSoc();
         cupraState.chargeSessionStartTime = Date.now();
-        if (!parkTimer) {
-            startParkTimer(240, "Cupra Born Ladestation");
-            showToast("🔌 Ladekabel verriegelt: Lade-Timer (240 Min.) automatisch gestartet!", "success");
+        if (!activeChargeSession && !parkTimer) {
+            const nearStation = (favorites && favorites.length > 0) ? favorites[0] : null;
+            const stationName = nearStation ? (nearStation.name || "Cupra Born Ladestation") : "Cupra Born Ladestation";
+            startSmartChargeGuardian({
+                station: nearStation || { id: "auto_born", name: stationName, latitude: currentDeviceCoords ? currentDeviceCoords.lat : null, longitude: currentDeviceCoords ? currentDeviceCoords.lon : null },
+                connectorLabel: "Typ 2 (OBD2 erkannt)",
+                freeMinutes: 240,
+                feePerMinute: 0.10,
+                nightStart: 21,
+                nightEnd: 9,
+                hasNightRule: true,
+                targetSoc: cupraState.targetSoc || 80,
+                startSoc: cupraState.chargeSessionStartSoc || 50,
+                neededMinutes: 120,
+                neededKwh: 20
+            });
+            showToast("🛡️ Ladekabel verriegelt: Lade-Wächter automatisch aktiviert!", "success");
         }
     }
     if (prev === "charging" && current !== "charging") {
@@ -3406,6 +3466,7 @@ function handleAutoPlugEvent(prev, current) {
             showToast(`✅ Ladevorgang beendet: +${gainedKwh} kWh (+${gainedSoc}% SoC) automatisch im Logbuch gespeichert!`, "success");
         }
         stopParkTimer();
+        stopSmartChargeGuardian();
     }
 }
 
@@ -3542,8 +3603,162 @@ function onBleDisconnected() {
 }
 
 /* ==========================================================================
-   Park-Timer & "Auto hier geparkt" Banner
+   Park-Timer, Lade-Wächter & "Auto hier geparkt" Banner
    ========================================================================== */
+let activeChargeSession = null;
+let chargeSessionInterval = null;
+
+function calculateClientBlockingDeadline(startDate, freeMinutes, nightStartHour = 21, nightEndHour = 9, hasNightRule = true) {
+    let curr = new Date(startDate.getTime());
+    let remainingMins = Math.max(0, freeMinutes);
+    if (!hasNightRule || remainingMins <= 0) {
+        return new Date(curr.getTime() + remainingMins * 60000);
+    }
+    while (remainingMins > 0) {
+        const h = curr.getHours();
+        const isNight = (nightStartHour > nightEndHour) ? (h >= nightStartHour || h < nightEndHour) : (h >= nightStartHour && h < nightEndHour);
+        if (isNight) {
+            if (h >= nightStartHour) {
+                curr.setDate(curr.getDate() + 1);
+                curr.setHours(nightEndHour, 0, 0, 0);
+            } else {
+                curr.setHours(nightEndHour, 0, 0, 0);
+            }
+        } else {
+            const nightToday = new Date(curr.getTime());
+            nightToday.setHours(nightStartHour, 0, 0, 0);
+            const minsUntilNight = Math.floor((nightToday.getTime() - curr.getTime()) / 60000);
+            if (remainingMins <= minsUntilNight) {
+                curr = new Date(curr.getTime() + remainingMins * 60000);
+                remainingMins = 0;
+            } else {
+                remainingMins -= minsUntilNight;
+                curr = nightToday;
+            }
+        }
+    }
+    return curr;
+}
+
+window.startSmartChargeGuardianFromSheet = function() {
+    if (!window.currentSheetStation) return;
+    const st = window.currentSheetStation;
+    const currentSoc = cupraState.liveSoc !== null ? cupraState.liveSoc : cupraState.manualSoc;
+    const targetSoc = cupraState.targetSoc || 80;
+    const deltaSoc = Math.max(0, targetSoc - currentSoc);
+    const usableCapacity = (cupraState.batteryCapacity || 58) * ((cupraState.soh || 98) / 100);
+    const neededKwh = (deltaSoc / 100) * usableCapacity;
+
+    let maxPower = 11;
+    let hasDc = false;
+    (st.connectors || []).forEach(c => {
+        const p = parseFloat(c.power_kw) || 0;
+        if (p > maxPower) maxPower = p;
+        if (c.power_type === 'DC' || p > 22) hasDc = true;
+    });
+
+    const chargePower = hasDc ? Math.min(135, maxPower) : 11;
+    const hoursNeeded = neededKwh / chargePower;
+    const minutesNeeded = Math.max(1, Math.round(hoursNeeded * 60));
+
+    const feeInfo = getBlockingFeeInfo(st.operator, hasDc);
+
+    let connLabel = "Typ 2";
+    if (st.connectors && st.connectors.length > 0) {
+        connLabel = st.connectors[0].point_label ? `${st.connectors[0].point_label} (${st.connectors[0].standard})` : st.connectors[0].standard;
+    }
+
+    startSmartChargeGuardian({
+        station: st,
+        connectorLabel: connLabel,
+        freeMinutes: feeInfo.freeMinutes,
+        feePerMinute: feeInfo.feePerMinute || 0.10,
+        nightStart: feeInfo.nightStart || 21,
+        nightEnd: feeInfo.nightEnd || 9,
+        hasNightRule: feeInfo.hasNightRule !== false,
+        targetSoc: targetSoc,
+        startSoc: currentSoc,
+        neededMinutes: minutesNeeded,
+        neededKwh: neededKwh
+    });
+};
+
+window.startSmartChargeGuardian = async function(params) {
+    const now = Date.now();
+    const st = params.station;
+    const targetReachedMs = now + (params.neededMinutes * 60 * 1000);
+    const targetDt = new Date(targetReachedMs);
+    const targetEtaStr = `ca. ${String(targetDt.getHours()).padStart(2, '0')}:${String(targetDt.getMinutes()).padStart(2, '0')} Uhr`;
+
+    const deadlineDt = calculateClientBlockingDeadline(
+        new Date(now),
+        params.freeMinutes,
+        params.nightStart,
+        params.nightEnd,
+        params.hasNightRule
+    );
+
+    const sessionData = {
+        station_id: String(st.id),
+        station_name: st.name || st.address || "Ladestation",
+        connector_label: params.connectorLabel || "Anschluss",
+        latitude: st.latitude,
+        longitude: st.longitude,
+        start_time_ms: now,
+        free_parking_minutes: params.freeMinutes,
+        night_window_start: params.nightStart,
+        night_window_end: params.nightEnd,
+        has_night_rule: params.hasNightRule,
+        target_soc: params.targetSoc,
+        start_soc: params.startSoc,
+        target_reached_ms: targetReachedMs,
+        target_soc_eta_str: targetEtaStr,
+        blocking_fee_per_min: params.feePerMinute,
+        deadline_ms: deadlineDt.getTime(),
+        deadline_str: `${String(deadlineDt.getHours()).padStart(2, '0')}:${String(deadlineDt.getMinutes()).padStart(2, '0')}`
+    };
+
+    activeChargeSession = sessionData;
+    localStorage.setItem("ev_charge_session", JSON.stringify(sessionData));
+
+    try {
+        await fetch(getApiUrl("api/charge-session/start"), {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(sessionData)
+        });
+    } catch (e) {
+        console.warn("Could not sync charge session to HA backend:", e);
+    }
+
+    startChargeSessionInterval();
+    updateStatusBanner();
+    closeModal("modal-station-detail");
+    showToast(`🛡️ Lade-Wächter gestartet: Freiparkzeit & ${params.targetSoc}% Alarm aktiv!`, "success");
+};
+
+window.stopSmartChargeGuardian = async function() {
+    if (chargeSessionInterval) clearInterval(chargeSessionInterval);
+    activeChargeSession = null;
+    localStorage.removeItem("ev_charge_session");
+    try {
+        await fetch(getApiUrl("api/charge-session/stop"), { method: "POST" });
+    } catch (e) {}
+    updateStatusBanner();
+    showToast("⏹️ Lade-Wächter beendet.", "info");
+};
+
+function startChargeSessionInterval() {
+    if (chargeSessionInterval) clearInterval(chargeSessionInterval);
+    chargeSessionInterval = setInterval(() => {
+        if (!activeChargeSession) {
+            clearInterval(chargeSessionInterval);
+            return;
+        }
+        updateStatusBanner();
+    }, 1000);
+}
+
 function initParkStatus() {
     try {
         const savedTimer = localStorage.getItem("ev_park_timer");
@@ -3556,6 +3771,11 @@ function initParkStatus() {
                 localStorage.removeItem("ev_park_timer");
             }
         }
+        const savedSession = localStorage.getItem("ev_charge_session");
+        if (savedSession) {
+            activeChargeSession = JSON.parse(savedSession);
+            startChargeSessionInterval();
+        }
         const savedPark = localStorage.getItem("ev_parked_car");
         if (savedPark) {
             parkedLocation = JSON.parse(savedPark);
@@ -3564,6 +3784,19 @@ function initParkStatus() {
         console.warn("Could not load park status", e);
     }
     updateStatusBanner();
+
+    // Background sync with HA charge session
+    fetch(getApiUrl("api/charge-session"))
+        .then(r => r.json())
+        .then(d => {
+            if (d && d.session) {
+                activeChargeSession = d.session;
+                localStorage.setItem("ev_charge_session", JSON.stringify(d.session));
+                startChargeSessionInterval();
+                updateStatusBanner();
+            }
+        })
+        .catch(() => {});
 }
 
 window.startParkTimer = function(minutes, stationName) {
@@ -3621,7 +3854,64 @@ function updateStatusBanner() {
 
     let itemsHtml = [];
 
-    if (parkTimer && parkTimer.endTimestamp > Date.now()) {
+    if (activeChargeSession) {
+        const now = Date.now();
+        const remSecs = Math.max(0, Math.floor((activeChargeSession.deadline_ms - now) / 1000));
+        const remHours = Math.floor(remSecs / 3600);
+        const remMins = Math.floor((remSecs % 3600) / 60);
+        const remS = remSecs % 60;
+        const timeStr = `${remHours > 0 ? remHours + ' Std. ' : ''}${remMins} Min. ${remS < 10 ? '0' : ''}${remS}s`;
+
+        const curDate = new Date();
+        const curH = curDate.getHours();
+        const nwStart = activeChargeSession.night_window_start || 21;
+        const nwEnd = activeChargeSession.night_window_end || 9;
+        const isNight = Boolean(activeChargeSession.has_night_rule &&
+            ((nwStart > nwEnd) ? (curH >= nwStart || curH < nwEnd) : (curH >= nwStart && curH < nwEnd)));
+
+        let feeStatusText = "";
+        const feeRate = Number(activeChargeSession.blocking_fee_per_min || 0.10).toFixed(2);
+        if (remSecs <= 0) {
+            feeStatusText = `<span style="color:#ef4444;font-weight:700;">⛔ Blockiergebühr aktiv (${feeRate} €/Min.)!</span>`;
+        } else if (isNight) {
+            feeStatusText = `<span style="color:#38bdf8;font-weight:600;">🌙 Nachtpause aktiv (Frei bis ${escapeHtml(activeChargeSession.deadline_str)} Uhr)</span>`;
+        } else if (remSecs <= 300) {
+            feeStatusText = `<span style="color:#ef4444;font-weight:700;">🚨 Nur noch ${timeStr} frei!</span>`;
+        } else if (remSecs <= 1200) {
+            feeStatusText = `<span style="color:#f59e0b;font-weight:700;">⚠️ Noch ${timeStr} frei (bis ${escapeHtml(activeChargeSession.deadline_str)} Uhr)</span>`;
+        } else {
+            feeStatusText = `<span style="color:#10b981;font-weight:600;">⏱️ Freiparkzeit: noch ${timeStr} (bis ${escapeHtml(activeChargeSession.deadline_str)} Uhr)</span>`;
+        }
+
+        const socRemSecs = Math.max(0, Math.floor((activeChargeSession.target_reached_ms - now) / 1000));
+        let socStatusText = "";
+        if (socRemSecs <= 0) {
+            socStatusText = `<span style="color:#10b981;font-weight:700;">✅ Ziel ${activeChargeSession.target_soc}% erreicht!</span>`;
+        } else {
+            const socMins = Math.ceil(socRemSecs / 60);
+            socStatusText = `<span>🎯 <b>Ziel ${activeChargeSession.target_soc}%:</b> in ca. ${socMins} Min. (${escapeHtml(activeChargeSession.target_soc_eta_str || '')})</span>`;
+        }
+
+        itemsHtml.push(`
+            <div class="banner-item guardian-banner-item" style="border-left: 4px solid var(--cupra-copper); background: rgba(235, 106, 56, 0.08); padding: 8px 12px; border-radius: 8px; margin-bottom: 4px;">
+                <div style="display:flex;flex-direction:column;gap:3px;flex:1;">
+                    <div style="font-weight:700;color:var(--text-primary);display:flex;align-items:center;gap:6px;font-size:0.88rem;">
+                        <span class="live-pulse-dot" style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#10b981;"></span>
+                        🛡️ Lade-Wächter: ${escapeHtml(activeChargeSession.station_name)} (${escapeHtml(activeChargeSession.connector_label)})
+                    </div>
+                    <div style="font-size:0.8rem;display:flex;gap:12px;flex-wrap:wrap;">
+                        ${socStatusText}
+                        ${feeStatusText}
+                    </div>
+                </div>
+                <div class="banner-actions">
+                    <button class="btn-banner" onclick="stopSmartChargeGuardian()" style="background:rgba(239,68,68,0.2);color:#ef4444;border-color:rgba(239,68,68,0.4);font-weight:600;">⏹️ Beenden</button>
+                </div>
+            </div>
+        `);
+    }
+
+    if (parkTimer && !activeChargeSession && parkTimer.endTimestamp > Date.now()) {
         const remSecs = Math.max(0, Math.floor((parkTimer.endTimestamp - Date.now()) / 1000));
         const remHours = Math.floor(remSecs / 3600);
         const remMins = Math.floor((remSecs % 3600) / 60);

@@ -158,6 +158,87 @@ class HANotifier:
 
         return False
 
+    async def notify_charge_guardian(
+        self,
+        session: Dict[str, Any],
+        alert_type: str,
+        config: Dict[str, Any]
+    ) -> bool:
+        """Sends a push notification to Home Assistant for active charging session alerts (20m, 5m, fee, SoC)."""
+        station_name = session.get("station_name") or "Ladestation"
+        connector_label = session.get("connector_label") or "Anschluss"
+        target_soc = session.get("target_soc", 80)
+        fee_per_min = session.get("blocking_fee_per_min", 0.10)
+
+        if alert_type == "warning_20":
+            title = f"⚠️ Noch 20 Min. Freiparkzeit ({station_name})"
+            message = f"An {station_name} ({connector_label}) endet in 20 Minuten die kostenfreie Ladezeit. Bitte plane das Umparken ein."
+        elif alert_type == "warning_5":
+            title = f"🚨 DRINGEND: Blockiergebühr in 5 Min.! ({station_name})"
+            message = f"Nur noch 5 Minuten Freiparkzeit an {station_name}! Anschließend fallen {fee_per_min:.2f} €/Min. Standgebühr an."
+        elif alert_type == "fee_active":
+            title = f"⛔ Blockiergebühr jetzt aktiv! ({station_name})"
+            message = f"Die Freiparkzeit an {station_name} ist abgelaufen. Dein Cupra Born steht ab jetzt in der kostenpflichtigen Blockierphase ({fee_per_min:.2f} €/Min.)!"
+        elif alert_type == "target_soc":
+            title = f"🎯 Ziel-Akkustand erreicht ({target_soc}%)"
+            message = f"Dein Cupra Born hat an {station_name} ({connector_label}) den gewünschten Ziel-SoC von {target_soc}% erreicht!"
+        else:
+            title = f"⚡ Lade-Wächter Info ({station_name})"
+            message = f"Lade-Wächter Status-Update für {station_name}."
+
+        lat = session.get("latitude")
+        lon = session.get("longitude")
+        gmaps_url = f"https://www.google.com/maps/dir/?api=1&destination={lat},{lon}" if lat and lon else "/ev_charge_live"
+
+        actions = [
+            {
+                "action": "URI",
+                "title": "🧭 Zu Google Maps",
+                "uri": gmaps_url
+            }
+        ]
+
+        notify_cfg = config.get("notifications", {})
+        target_devices = notify_cfg.get("target_devices")
+        if not target_devices or not isinstance(target_devices, list):
+            single_svc = notify_cfg.get("service", "notify.mobile_app_2407fpn8eg")
+            target_devices = [single_svc] if single_svc else ["notify.mobile_app_2407fpn8eg"]
+
+        notify_payload = {
+            "title": title,
+            "message": message,
+            "data": {
+                "tag": f"ev_charge_guardian_{session.get('station_id')}_{alert_type}",
+                "url": gmaps_url,
+                "clickAction": gmaps_url,
+                "actions": actions
+            }
+        }
+
+        success = False
+        for dev_str in dict.fromkeys(str(d).strip().lower() for d in target_devices):
+            if not SAFE_NOTIFY_RE.match(dev_str):
+                continue
+            service = dev_str.split(".", 1)[1]
+            ok = await self._call_service("notify", service, notify_payload)
+            if ok:
+                success = True
+
+        ha_cfg = config.get("home_assistant_integration", {})
+        if ha_cfg.get("fire_ha_events", True):
+            await self._fire_event("ev_charge_guardian_alert", {
+                "alert_type": alert_type,
+                "station_id": session.get("station_id"),
+                "station_name": station_name,
+                "connector_label": connector_label,
+                "target_soc": target_soc,
+                "latitude": lat,
+                "longitude": lon
+            })
+
+        _LOGGER.info("Sent charge guardian alert '%s' for station %s: %s", alert_type, station_name, title)
+        return success
+
     async def send_test_notification(self, config: Dict[str, Any]) -> bool:
         """Sends an immediate test notification to verify HA companion app setup."""
         dummy_station = {

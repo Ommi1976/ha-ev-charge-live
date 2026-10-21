@@ -173,6 +173,7 @@ OPTIONS_FILE = os.path.join(DATA_DIR, "options.json")
 CONFIG_OVERRIDE_FILE = os.path.join(DATA_DIR, "config_override.json")
 FAVORITES_FILE = os.path.join(DATA_DIR, "favorites.json")
 WATCHLIST_FILE = os.path.join(DATA_DIR, "watchlist.json")
+SESSION_FILE = os.path.join(DATA_DIR, "charge_session.json")
 
 
 class StorageManager:
@@ -350,6 +351,41 @@ class StorageManager:
                 return
             merged = [live_map.get(str(item.get("id")), item) for item in current_wl]
             self.save_watchlist(merged)
+
+    def load_charge_session(self) -> Optional[Dict[str, Any]]:
+        """Loads active charging session (Lade-Wächter)."""
+        with self._lock:
+            if not os.path.exists(SESSION_FILE):
+                return None
+            try:
+                with open(SESSION_FILE, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    return data if isinstance(data, dict) else None
+            except Exception as err:
+                _LOGGER.warning("Failed to load charge session: %s", err)
+                return None
+
+    def save_charge_session(self, session: Optional[Dict[str, Any]]) -> None:
+        """Atomically saves the active charging session."""
+        with self._lock:
+            if session is None:
+                self.clear_charge_session()
+                return
+            try:
+                self._atomic_write_json(SESSION_FILE, session)
+                _LOGGER.info("Saved charge session for station %s", session.get("station_name"))
+            except Exception as err:
+                _LOGGER.error("Failed to save charge session: %s", err)
+
+    def clear_charge_session(self) -> None:
+        """Removes the active charging session file."""
+        with self._lock:
+            try:
+                if os.path.exists(SESSION_FILE):
+                    os.remove(SESSION_FILE)
+                    _LOGGER.info("Cleared active charge session.")
+            except Exception as err:
+                _LOGGER.warning("Failed to remove charge session file: %s", err)
 
     def _fill_missing(self, base: Dict[str, Any], defaults: Dict[str, Any]) -> None:
         for k, v in defaults.items():
