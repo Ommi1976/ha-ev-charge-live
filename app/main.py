@@ -1,5 +1,6 @@
 import asyncio
 from contextlib import asynccontextmanager
+import datetime
 import logging
 import math
 import os
@@ -8,7 +9,7 @@ from typing import Any, Dict, List, Optional
 import httpx
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
+from fastapi.responses import HTMLResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 
 from .client import ev_client
@@ -502,4 +503,3 @@ async def calculate_route(
         "duration_minutes": round(direct_km / 90.0 * 60),
         "coordinates": [[start_lat, start_lon], [end_lat, end_lon]]
     }
-

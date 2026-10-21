@@ -389,10 +389,13 @@ class SyncWorker:
                 storage.save_charge_session(session)
                 await notifier.notify_charge_guardian(session, "warning_20", config)
             elif rem_mins <= 5 and rem_mins > 0 and not session.get("notified_5"):
+                session["notified_20"] = True
                 session["notified_5"] = True
                 storage.save_charge_session(session)
                 await notifier.notify_charge_guardian(session, "warning_5", config)
             elif rem_mins <= 0 and not session.get("notified_fee"):
+                session["notified_20"] = True
+                session["notified_5"] = True
                 session["notified_fee"] = True
                 storage.save_charge_session(session)
                 await notifier.notify_charge_guardian(session, "fee_active", config)

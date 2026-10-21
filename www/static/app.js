@@ -1165,8 +1165,8 @@ function buildStationDetailBodyHtml(st) {
         `;
     }).join("");
 
-    const currentSoc = cupraState.liveSoc !== null ? cupraState.liveSoc : cupraState.manualSoc;
-    const targetSoc = cupraState.targetSoc;
+    const currentSoc = (cupraState.liveSoc !== null && cupraState.liveSoc !== undefined) ? cupraState.liveSoc : ((cupraState.manualSoc !== null && cupraState.manualSoc !== undefined) ? cupraState.manualSoc : 50);
+    const targetSoc = cupraState.targetSoc || 80;
     const deltaSoc = Math.max(0, targetSoc - currentSoc);
     const usableCapacity = (cupraState.batteryCapacity || 58) * ((cupraState.soh || 98) / 100);
     const neededKwh = (deltaSoc / 100) * usableCapacity;
@@ -1234,13 +1234,15 @@ function buildStationDetailBodyHtml(st) {
         </div>
     `).join("");
 
-    const savingsHtml = tariffInfo.savings ? `<div class="tariff-savings-tip">💡 <b>Tipp:</b> Mit <b>${escapeHtml(tariffInfo.cheapest.name)}</b> sparst du hier ca. <b>${tariffInfo.savings} €</b>!</div>` : '';
+    const savingsHtml = (tariffInfo.savings && tariffInfo.cheapest && tariffInfo.cheapest.name) ? `<div class="tariff-savings-tip">💡 <b>Tipp:</b> Mit <b>${escapeHtml(tariffInfo.cheapest.name)}</b> sparst du hier ca. <b>${tariffInfo.savings} €</b>!</div>` : '';
+
+    const cheapestBadgeText = (tariffInfo.cheapest && tariffInfo.cheapest.name) ? `${escapeHtml(tariffInfo.cheapest.name.split(' ')[0])} am günstigsten` : 'Günstigster Tarif';
 
     const tariffAdvisorHtml = `
         <div class="tariff-advisor-box">
             <div class="tariff-advisor-header">
                 <span>💳 <b>Tarif-Vergleich (${neededKwh.toFixed(1)} kWh • ${escapeHtml(tariffInfo.powerCategory.toUpperCase())})</b></span>
-                <span class="badge-cheapest">🏆 ${escapeHtml(tariffInfo.cheapest.name.split(' ')[0])} am günstigsten</span>
+                <span class="badge-cheapest">🏆 ${cheapestBadgeText}</span>
             </div>
             <div class="tariff-cards-list">
                 ${tariffCardsHtml}
@@ -2685,7 +2687,7 @@ window.clearObdDebugLog = function() {
 window.copyObdDebugLog = async function() {
     const metaEl = document.getElementById("obd-diag-meta");
     const header = [
-        "=== EV Charge Live OBD2 Diagnose-Protokoll (v1.3.11) ===",
+        "=== EV Charge Live OBD2 Diagnose-Protokoll (v1.3.12) ===",
         `Zeitpunkt: ${new Date().toISOString()}`,
         `Treiber-Info: ${metaEl ? metaEl.textContent : "n/a"}`,
         `Verbindungsstatus: connected=${bleConnection.connected}, transport=${bleConnection.transport || "none"}, deviceId=${bleConnection.deviceId || "none"}`,
@@ -3643,7 +3645,7 @@ function calculateClientBlockingDeadline(startDate, freeMinutes, nightStartHour 
 window.startSmartChargeGuardianFromSheet = function() {
     if (!window.currentSheetStation) return;
     const st = window.currentSheetStation;
-    const currentSoc = cupraState.liveSoc !== null ? cupraState.liveSoc : cupraState.manualSoc;
+    const currentSoc = (cupraState.liveSoc !== null && cupraState.liveSoc !== undefined) ? cupraState.liveSoc : ((cupraState.manualSoc !== null && cupraState.manualSoc !== undefined) ? cupraState.manualSoc : 50);
     const targetSoc = cupraState.targetSoc || 80;
     const deltaSoc = Math.max(0, targetSoc - currentSoc);
     const usableCapacity = (cupraState.batteryCapacity || 58) * ((cupraState.soh || 98) / 100);

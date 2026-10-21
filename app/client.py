@@ -187,6 +187,19 @@ class EVChargeClient:
                 if station:
                     overlay_ok = await self._apply_enbw_overlay_single(station, http_client)
                     if overlay_ok:
+                        if len(self._last_known_live_stations) > 250:
+                            now_ts = time.time()
+                            self._last_known_live_stations = {
+                                k: v for k, v in self._last_known_live_stations.items()
+                                if (now_ts - v[1]) < 300.0
+                            }
+                            if len(self._last_known_live_stations) > 250:
+                                sorted_items = sorted(
+                                    self._last_known_live_stations.items(),
+                                    key=lambda it: it[1][1],
+                                    reverse=True
+                                )
+                                self._last_known_live_stations = dict(sorted_items[:150])
                         self._last_known_live_stations[str(station_id)] = (dict(station), time.time())
                     else:
                         # Grace period: if EnBW overlay temporarily fails or throttles, retain last known live state for up to 300s

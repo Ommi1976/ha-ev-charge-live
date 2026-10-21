@@ -2,7 +2,7 @@ import datetime
 import logging
 import os
 import re
-from typing import Any, Dict, Optional
+from typing import Any, Dict
 import httpx
 
 _LOGGER = logging.getLogger("ev_charge_live.notifier")

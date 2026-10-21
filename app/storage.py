@@ -67,6 +67,23 @@ def sanitize_station(station: Any) -> Dict[str, Any]:
     return clean
 
 
+def sanitize_charge_session(session: Dict[str, Any]) -> Dict[str, Any]:
+    """Validates and bounds charge session parameters to prevent invalid states."""
+    if not isinstance(session, dict):
+        return {}
+    clean = dict(session)
+    if "target_soc" in clean:
+        clean["target_soc"] = _clamp_int(clean["target_soc"], 10, 100, 80)
+    if "free_parking_minutes" in clean:
+        clean["free_parking_minutes"] = _clamp_int(clean["free_parking_minutes"], 0, 720, 240)
+    if "needed_minutes" in clean:
+        clean["needed_minutes"] = _clamp_int(clean["needed_minutes"], 1, 1440, 60)
+    if "fee_per_minute" in clean:
+        val = _safe_float(clean["fee_per_minute"], 0.0, 10.0)
+        clean["fee_per_minute"] = val if val is not None else 0.10
+    return clean
+
+
 def sanitize_config(cfg: Dict[str, Any]) -> Dict[str, Any]:
     """Validates/clamps known config fields in-place so bad UI/options values can't break the add-on."""
     for key in CLIENT_ONLY_SECRET_KEYS:
@@ -372,8 +389,9 @@ class StorageManager:
                 self.clear_charge_session()
                 return
             try:
-                self._atomic_write_json(SESSION_FILE, session)
-                _LOGGER.info("Saved charge session for station %s", session.get("station_name"))
+                clean_session = sanitize_charge_session(session)
+                self._atomic_write_json(SESSION_FILE, clean_session)
+                _LOGGER.info("Saved charge session for station %s", clean_session.get("station_name"))
             except Exception as err:
                 _LOGGER.error("Failed to save charge session: %s", err)
 
