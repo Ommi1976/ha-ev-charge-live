@@ -24,6 +24,7 @@ _LOGGER = logging.getLogger("ev_charge_live.main")
 
 SAFE_HA_ENTITY_RE = re.compile(r"^[a-z0-9_]+\.[a-z0-9_]+$")
 SAFE_NOTIFY_RE = re.compile(r"^notify\.[a-z0-9_]+$")
+SAFE_HOST_RE = re.compile(r"^[a-zA-Z0-9.\-_]+(?::\d{1,5})?$")
 
 # Home Assistant Ingress proxy address; when running as add-on only it (and loopback) may talk to us
 INGRESS_ALLOWED_HOSTS = {"172.30.32.2", "127.0.0.1", "::1"}
@@ -131,11 +132,15 @@ async def get_pairing_info(request: Request) -> Dict[str, Any]:
     cfg_token = str(config.get("ha_token") or "").strip()
 
     # Auto-detect base HA URL from Ingress request headers if not explicitly configured
-    proto = request.headers.get("x-forwarded-proto", "http").split(",")[0].strip()
-    host = request.headers.get("x-forwarded-host", "").split(",")[0].strip()
-    if not host:
-        host = request.headers.get("host", "").split(",")[0].strip()
+    proto = request.headers.get("x-forwarded-proto", "http").split(",")[0].strip().lower()
+    if proto not in ("http", "https"):
+        proto = "http"
+    raw_host = request.headers.get("x-forwarded-host", "").split(",")[0].strip()
+    if not raw_host:
+        raw_host = request.headers.get("host", "").split(",")[0].strip()
 
+    # Sanitize host to prevent HTTP Host Header Injection
+    host = raw_host if SAFE_HOST_RE.match(raw_host) else ""
     detected_url = f"{proto}://{host}" if host else ""
     effective_url = cfg_url or detected_url or "http://homeassistant.local:8123"
 
@@ -160,10 +165,21 @@ async def get_pairing_info(request: Request) -> Dict[str, Any]:
 @app.get("/api/pairing-qr")
 async def get_pairing_qr(
     request: Request,
-    url: Optional[str] = None,
-    token: Optional[str] = None
+    url: Optional[str] = Query(None, max_length=512),
+    token: Optional[str] = Query(None, max_length=2048)
 ) -> Response:
     """Generates an SVG QR code for 1-click mobile APK pairing."""
+    # Bounded input validation
+    if url is not None:
+        url_clean = url.strip()
+        if url_clean and not (url_clean.startswith("http://") or url_clean.startswith("https://")):
+            raise HTTPException(status_code=400, detail="Invalid URL scheme. Must start with http:// or https://")
+        if len(url_clean) > 512:
+            raise HTTPException(status_code=400, detail="URL exceeds maximum length of 512 characters")
+
+    if token is not None and len(token) > 2048:
+        raise HTTPException(status_code=400, detail="Token exceeds maximum length of 2048 characters")
+
     try:
         import qrcode
         import qrcode.image.svg
@@ -171,8 +187,11 @@ async def get_pairing_qr(
         config = storage.load_config()
         effective_url = (url or config.get("ha_server_url") or "").strip()
         if not effective_url:
-            proto = request.headers.get("x-forwarded-proto", "http").split(",")[0].strip()
-            host = request.headers.get("x-forwarded-host", "").split(",")[0].strip() or request.headers.get("host", "").split(",")[0].strip()
+            proto = request.headers.get("x-forwarded-proto", "http").split(",")[0].strip().lower()
+            if proto not in ("http", "https"):
+                proto = "http"
+            raw_host = (request.headers.get("x-forwarded-host", "") or request.headers.get("host", "")).split(",")[0].strip()
+            host = raw_host if SAFE_HOST_RE.match(raw_host) else ""
             effective_url = f"{proto}://{host}" if host else "http://homeassistant.local:8123"
 
         effective_token = (token if token is not None else config.get("ha_token") or "").strip()
@@ -198,6 +217,8 @@ async def get_pairing_qr(
 
         svg_bytes = img.to_string()
         return Response(content=svg_bytes, media_type="image/svg+xml")
+    except HTTPException:
+        raise
     except Exception as err:
         _LOGGER.error("Failed to generate pairing QR: %s", err, exc_info=True)
         raise HTTPException(status_code=500, detail="QR generation failed")

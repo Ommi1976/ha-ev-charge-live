@@ -2731,7 +2731,7 @@ window.clearObdDebugLog = function() {
 window.copyObdDebugLog = async function() {
     const metaEl = document.getElementById("obd-diag-meta");
     const header = [
-        "=== EV Charge Live OBD2 Diagnose-Protokoll (v1.3.15) ===",
+        "=== EV Charge Live OBD2 Diagnose-Protokoll (v1.3.16) ===",
         `Zeitpunkt: ${new Date().toISOString()}`,
         `Treiber-Info: ${metaEl ? metaEl.textContent : "n/a"}`,
         `Verbindungsstatus: connected=${bleConnection.connected}, connecting=${bleConnection.connecting}, transport=${bleConnection.transport || "none"}, deviceId=${bleConnection.deviceId || "none"}`,
@@ -3061,6 +3061,26 @@ async function connectVlinkerBle(silent = false, isAutoRetry = false) {
 
         obdLog("info", `=== Starte Verbindungsaufbau (Gerät: ${selectedDeviceValue}, Protokoll: ${selectedProto}) ===`);
 
+        // Bluetooth Adapter-Zustand prüfen vor Verbindungsversuchen
+        if (hasObdClassic) {
+            const permCheck = await ObdClassic.ensurePermissions().catch(() => null);
+            if (permCheck && permCheck.bluetoothEnabled === false) {
+                obdLog("warn", "[Bluetooth] Bluetooth-Adapter ist auf dem Smartphone ausgeschaltet.");
+                if (statusPill) {
+                    statusPill.className = "badge badge-warning";
+                    statusPill.textContent = "Bluetooth am Handy AUS";
+                }
+                if (!silent) {
+                    showToast("Bitte Bluetooth auf deinem Smartphone einschalten.", "warning");
+                }
+                if (isObdAutoReconnectEnabled() && !bleManualDisconnected) {
+                    scheduleObdAutoReconnect(30000);
+                }
+                bleConnection.connecting = false;
+                return;
+            }
+        }
+
         // Gekoppelte Geräte aktualisieren
         const bondedList = await window.refreshObdBondedDevices(true);
 
@@ -3127,6 +3147,16 @@ async function connectVlinkerBle(silent = false, isAutoRetry = false) {
                 localStorage.setItem("ev_last_ble_device_id", addr);
 
                 obdLog("success", `✅ Classic SPP verbunden mit "${bleConnection.device.name}" [${addr}] über Strategie [${sppRes?.strategy || sppStrategy}]!`);
+
+                if (bleManualDisconnected) {
+                    obdLog("info", "Verbindungsaufbau abgebrochen (Benutzer hat 'Trennen' gedrückt).");
+                    if (window.Capacitor?.Plugins?.ObdClassic) {
+                        await window.Capacitor.Plugins.ObdClassic.disconnectSpp().catch(() => {});
+                    }
+                    onBleDisconnected();
+                    bleConnection.connecting = false;
+                    return;
+                }
             } catch (sppErr) {
                 const errMsg = sppErr?.message || String(sppErr);
                 obdLog("error", `❌ Classic SPP Verbindung zu [${addr}] fehlgeschlagen: ${errMsg}`);
@@ -3438,7 +3468,7 @@ function parseBleResponse(response) {
 
     // Display SoC (PID 02 8C -> Positiv-Antwort 62 02 8C [BYTE])
     if (cleaned.includes("62028C")) {
-        const idx = cleaned.indexOf("62028C") + 6;
+        const idx = cleaned.lastIndexOf("62028C") + 6;
         const hexVal = cleaned.substring(idx, idx + 2);
         if (hexVal && hexVal.length === 2) {
             const raw = parseInt(hexVal, 16);
@@ -3457,7 +3487,7 @@ function parseBleResponse(response) {
 
     // Real BMS SoC (PID 02 8D -> Positiv-Antwort 62 02 8D [BYTE])
     if (cleaned.includes("62028D")) {
-        const idx = cleaned.indexOf("62028D") + 6;
+        const idx = cleaned.lastIndexOf("62028D") + 6;
         const hexVal = cleaned.substring(idx, idx + 2);
         if (hexVal && hexVal.length === 2) {
             const raw = parseInt(hexVal, 16);
@@ -3473,7 +3503,7 @@ function parseBleResponse(response) {
 
     // Akkutemperatur (PID 02 8E -> Positiv-Antwort 62 02 8E [BYTE], Offset -40)
     if (cleaned.includes("62028E")) {
-        const idx = cleaned.indexOf("62028E") + 6;
+        const idx = cleaned.lastIndexOf("62028E") + 6;
         const hexVal = cleaned.substring(idx, idx + 2);
         if (hexVal && hexVal.length === 2) {
             const raw = parseInt(hexVal, 16);
@@ -3489,7 +3519,7 @@ function parseBleResponse(response) {
 
     // 12V Bordnetzbatterie (PID 02 88 -> Positiv-Antwort 62 02 88 [BYTE])
     if (cleaned.includes("620288")) {
-        const idx = cleaned.indexOf("620288") + 6;
+        const idx = cleaned.lastIndexOf("620288") + 6;
         const hexVal = cleaned.substring(idx, idx + 2);
         if (hexVal && hexVal.length === 2) {
             const raw = parseInt(hexVal, 16);
@@ -3503,7 +3533,7 @@ function parseBleResponse(response) {
 
     // Battery State of Health (SoH) - PID 02 8A -> 62 02 8A [BYTE]
     if (cleaned.includes("62028A")) {
-        const idx = cleaned.indexOf("62028A") + 6;
+        const idx = cleaned.lastIndexOf("62028A") + 6;
         const hexVal = cleaned.substring(idx, idx + 2);
         if (hexVal && hexVal.length === 2) {
             const raw = parseInt(hexVal, 16);
@@ -3528,7 +3558,7 @@ function parseBleResponse(response) {
 
     // Battery State of Health alternative PID 1E 3B -> 62 1E 3B [BYTE]
     if (cleaned.includes("621E3B")) {
-        const idx = cleaned.indexOf("621E3B") + 6;
+        const idx = cleaned.lastIndexOf("621E3B") + 6;
         const hexVal = cleaned.substring(idx, idx + 2);
         if (hexVal && hexVal.length === 2) {
             const raw = parseInt(hexVal, 16);
@@ -3543,7 +3573,7 @@ function parseBleResponse(response) {
 
     // Stecker- & Ladestatus (PID 02 8F -> Positiv-Antwort 62 02 8F [BYTE])
     if (cleaned.includes("62028F")) {
-        const idx = cleaned.indexOf("62028F") + 6;
+        const idx = cleaned.lastIndexOf("62028F") + 6;
         const hexVal = cleaned.substring(idx, idx + 2);
         if (hexVal && hexVal.length === 2) {
             const statusByte = parseInt(hexVal, 16);
@@ -4925,8 +4955,8 @@ window.runRoutePlanning = async function() {
         : [[startLat, startLon], [destLat, destLon]];
 
     // 4. EV Energy Calculation for Cupra Born
-    const consumptionKwh = winterMode ? 19.5 : 16.5;
-    const batteryCapacity = cupraState.batteryCapacity || 58.0;
+    const consumptionKwh = Math.max(5.0, winterMode ? 19.5 : 16.5);
+    const batteryCapacity = Math.max(20.0, cupraState.batteryCapacity || 58.0);
     const currentSoc = getActiveSoc();
 
     // Usable energy until minimum buffer is reached

@@ -76,6 +76,30 @@ class TestApi(unittest.TestCase):
         self.assertIn("image/svg+xml", custom_resp.headers.get("content-type", ""))
         self.assertGreater(len(custom_resp.content), 500)
 
+    def test_pairing_qr_validation_invalid_scheme(self):
+        resp = self.client.get("/api/pairing-qr?url=javascript:alert(1)")
+        self.assertEqual(resp.status_code, 400)
+
+    def test_pairing_qr_validation_excessive_url_length(self):
+        long_url = "http://example.com/" + "a" * 600
+        resp = self.client.get(f"/api/pairing-qr?url={long_url}")
+        self.assertIn(resp.status_code, (400, 422))
+
+    def test_pairing_qr_validation_excessive_token_length(self):
+        long_token = "token_" + "x" * 2500
+        resp = self.client.get(f"/api/pairing-qr?token={long_token}")
+        self.assertIn(resp.status_code, (400, 422))
+
+    def test_pairing_info_host_sanitization(self):
+        # Malicious Host header with CRLF injection
+        headers = {"X-Forwarded-Host": "malicious.com\r\nInjected: true"}
+        resp = self.client.get("/api/pairing-info", headers=headers)
+        self.assertEqual(resp.status_code, 200)
+        data = resp.json()
+        self.assertNotIn("Injected", data.get("ha_url", ""))
+        self.assertNotIn("\r", data.get("ha_url", ""))
+        self.assertNotIn("\n", data.get("ha_url", ""))
+
 
 if __name__ == "__main__":
     unittest.main()
