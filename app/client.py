@@ -658,6 +658,10 @@ class EVChargeClient:
             return False
 
         # Check tight bounding box with caching
+        if len(self._enbw_cache) > 100:
+            self._enbw_cache.clear()
+            self._enbw_cache_time.clear()
+
         delta = 0.005
         cache_key = f"{round(lat - delta, 3)}_{round(lat + delta, 3)}_{round(lon - delta, 3)}_{round(lon + delta, 3)}"
         now = time.time()

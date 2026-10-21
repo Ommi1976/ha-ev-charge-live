@@ -59,6 +59,7 @@ public class ObdClassicPlugin extends Plugin {
 
     private final ExecutorService ioExecutor = Executors.newSingleThreadExecutor();
     private volatile BluetoothSocket activeSocket = null;
+    private volatile BluetoothSocket connectingSocket = null;
     private volatile InputStream activeInput = null;
     private volatile OutputStream activeOutput = null;
     private volatile Thread readerThread = null;
@@ -256,12 +257,15 @@ public class ObdClassicPlugin extends Plugin {
                     try {
                         emitDebug("info", "Versuche RFCOMM-Socket [" + strat + "] zu " + address + "...");
                         candidate = createSocketByStrategy(device, strat);
+                        connectingSocket = candidate;
                         candidate.connect();
+                        connectingSocket = null;
                         connectedSock = candidate;
                         winningStrategy = strat;
                         emitDebug("success", "RFCOMM-Socket [" + strat + "] erfolgreich verbunden!");
                         break;
                     } catch (Exception ex) {
+                        connectingSocket = null;
                         String errMsg = ex.getClass().getSimpleName() + ": " + ex.getMessage();
                         emitDebug("warn", "Strategie [" + strat + "] fehlgeschlagen -> " + errMsg);
                         if (errorSummary.length() > 0) errorSummary.append(" | ");
@@ -393,8 +397,8 @@ public class ObdClassicPlugin extends Plugin {
 
     @PluginMethod
     public void disconnectSpp(PluginCall call) {
+        closeActiveSocketInternal();
         ioExecutor.execute(() -> {
-            closeActiveSocketInternal();
             emitDebug("info", "SPP-Verbindung sauber getrennt.");
             JSObject ret = new JSObject();
             ret.put("disconnected", true);
@@ -404,6 +408,10 @@ public class ObdClassicPlugin extends Plugin {
 
     private synchronized void closeActiveSocketInternal() {
         readerRunning = false;
+        if (connectingSocket != null) {
+            try { connectingSocket.close(); } catch (Exception ignored) {}
+            connectingSocket = null;
+        }
         if (readerThread != null) {
             try { readerThread.interrupt(); } catch (Exception ignored) {}
             readerThread = null;

@@ -1,11 +1,25 @@
 // Determine Ingress base path dynamically
 const getApiUrl = (endpoint) => {
     let path = window.location.pathname;
-    if (!path.endsWith('/')) {
+    if (path.endsWith('.html') || path.endsWith('.htm')) {
+        path = path.substring(0, path.lastIndexOf('/') + 1);
+    } else if (!path.endsWith('/')) {
         path += '/';
     }
     return `${path}${endpoint.replace(/^\//, '')}`;
 };
+
+function calculateDistanceKm(lat1, lon1, lat2, lon2) {
+    if (lat1 === null || lon1 === null || lat2 === null || lon2 === null) return 999999;
+    const r = 6371;
+    const dLat = (lat2 - lat1) * Math.PI / 180;
+    const dLon = (lon2 - lon1) * Math.PI / 180;
+    const a = Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+              Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
+              Math.sin(dLon / 2) * Math.sin(dLon / 2);
+    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+    return r * c;
+}
 
 const escapeHtml = (unsafe) => {
     if (unsafe === null || unsafe === undefined) return "";
@@ -186,8 +200,9 @@ document.addEventListener("DOMContentLoaded", async () => {
         if (map) map.invalidateSize();
     }, 300);
 
-    // Auto-refresh every 60 seconds
+    // Auto-refresh every 60 seconds (paused when tab is hidden to save mobile battery & data)
     setInterval(async () => {
+        if (document.hidden) return;
         await searchStations(false);
         await loadFavorites();
         await loadWatchlist();
@@ -2687,7 +2702,7 @@ window.clearObdDebugLog = function() {
 window.copyObdDebugLog = async function() {
     const metaEl = document.getElementById("obd-diag-meta");
     const header = [
-        "=== EV Charge Live OBD2 Diagnose-Protokoll (v1.3.12) ===",
+        "=== EV Charge Live OBD2 Diagnose-Protokoll (v1.3.13) ===",
         `Zeitpunkt: ${new Date().toISOString()}`,
         `Treiber-Info: ${metaEl ? metaEl.textContent : "n/a"}`,
         `Verbindungsstatus: connected=${bleConnection.connected}, transport=${bleConnection.transport || "none"}, deviceId=${bleConnection.deviceId || "none"}`,
@@ -3439,22 +3454,54 @@ function handleAutoPlugEvent(prev, current) {
         cupraState.chargeSessionStartSoc = getActiveSoc();
         cupraState.chargeSessionStartTime = Date.now();
         if (!activeChargeSession && !parkTimer) {
-            const nearStation = (favorites && favorites.length > 0) ? favorites[0] : null;
-            const stationName = nearStation ? (nearStation.name || "Cupra Born Ladestation") : "Cupra Born Ladestation";
+            let nearStation = null;
+            if (currentDeviceCoords && Array.isArray(activeStations) && activeStations.length > 0) {
+                nearStation = activeStations.find(s => {
+                    if (s.latitude === null || s.longitude === null) return false;
+                    return calculateDistanceKm(currentDeviceCoords.lat, currentDeviceCoords.lon, s.latitude, s.longitude) <= 0.35;
+                });
+            }
+            if (!nearStation && currentDeviceCoords && Array.isArray(favorites) && favorites.length > 0) {
+                nearStation = favorites.find(s => {
+                    if (s.latitude === null || s.longitude === null) return false;
+                    return calculateDistanceKm(currentDeviceCoords.lat, currentDeviceCoords.lon, s.latitude, s.longitude) <= 0.35;
+                });
+            }
+
+            let stationName = "Ladesäule unterwegs";
+            let op = "default";
+            let hasDc = false;
+            let feeInfo = { freeMinutes: 60, feePerMinute: 0.10, nightStart: 21, nightEnd: 9, hasNightRule: true };
+
+            if (nearStation) {
+                stationName = nearStation.name || nearStation.address || "Ladestation";
+                op = nearStation.operator || "default";
+                hasDc = (nearStation.connectors || []).some(c => c.power_type === 'DC' || (parseFloat(c.power_kw) || 0) > 22);
+                feeInfo = getBlockingFeeInfo(op, hasDc);
+            }
+
+            const targetSoc = cupraState.targetSoc || 80;
+            const startSoc = cupraState.chargeSessionStartSoc || 50;
+            const deltaSoc = Math.max(0, targetSoc - startSoc);
+            const usableCap = (cupraState.batteryCapacity || 58) * ((cupraState.soh || 98) / 100);
+            const neededKwh = (deltaSoc / 100) * usableCap;
+            const chargePower = hasDc ? 100 : 11;
+            const neededMinutes = Math.max(1, Math.round((neededKwh / chargePower) * 60));
+
             startSmartChargeGuardian({
                 station: nearStation || { id: "auto_born", name: stationName, latitude: currentDeviceCoords ? currentDeviceCoords.lat : null, longitude: currentDeviceCoords ? currentDeviceCoords.lon : null },
-                connectorLabel: "Typ 2 (OBD2 erkannt)",
-                freeMinutes: 240,
-                feePerMinute: 0.10,
-                nightStart: 21,
-                nightEnd: 9,
-                hasNightRule: true,
-                targetSoc: cupraState.targetSoc || 80,
-                startSoc: cupraState.chargeSessionStartSoc || 50,
-                neededMinutes: 120,
-                neededKwh: 20
+                connectorLabel: hasDc ? "CCS DC (OBD2 erkannt)" : "Typ 2 AC (OBD2 erkannt)",
+                freeMinutes: feeInfo.freeMinutes,
+                feePerMinute: feeInfo.feePerMinute || 0.10,
+                nightStart: feeInfo.nightStart || 21,
+                nightEnd: feeInfo.nightEnd || 9,
+                hasNightRule: feeInfo.hasNightRule !== false,
+                targetSoc: targetSoc,
+                startSoc: startSoc,
+                neededMinutes: neededMinutes,
+                neededKwh: neededKwh
             });
-            showToast("🛡️ Ladekabel verriegelt: Lade-Wächter automatisch aktiviert!", "success");
+            showToast(`🛡️ Ladekabel verriegelt: Lade-Wächter für "${stationName}" gestartet!`, "success");
         }
     }
     if (prev === "charging" && current !== "charging") {
@@ -3630,6 +3677,10 @@ function calculateClientBlockingDeadline(startDate, freeMinutes, nightStartHour 
             const nightToday = new Date(curr.getTime());
             nightToday.setHours(nightStartHour, 0, 0, 0);
             const minsUntilNight = Math.floor((nightToday.getTime() - curr.getTime()) / 60000);
+            if (minsUntilNight <= 0) {
+                curr.setHours(nightStartHour, 0, 0, 0);
+                continue;
+            }
             if (remainingMins <= minsUntilNight) {
                 curr = new Date(curr.getTime() + remainingMins * 60000);
                 remainingMins = 0;
@@ -3873,8 +3924,14 @@ function updateStatusBanner() {
 
         let feeStatusText = "";
         const feeRate = Number(activeChargeSession.blocking_fee_per_min || 0.10).toFixed(2);
-        if (remSecs <= 0) {
-            feeStatusText = `<span style="color:#ef4444;font-weight:700;">⛔ Blockiergebühr aktiv (${feeRate} €/Min.)!</span>`;
+        if (now >= activeChargeSession.deadline_ms) {
+            const overdueSecs = Math.floor((now - activeChargeSession.deadline_ms) / 1000);
+            const overdueMins = Math.floor(overdueSecs / 60);
+            const overdueH = Math.floor(overdueMins / 60);
+            const overdueM = overdueMins % 60;
+            const overdueStr = overdueH > 0 ? `${overdueH} Std. ${overdueM} Min.` : `${overdueMins} Min.`;
+            const accFee = (overdueMins * Number(activeChargeSession.blocking_fee_per_min || 0.10)).toFixed(2).replace('.', ',');
+            feeStatusText = `<span style="color:#ef4444;font-weight:700;">⛔ Blockiergebühr aktiv: seit ${overdueStr} (ca. ${accFee} € aufgelaufen)!</span>`;
         } else if (isNight) {
             feeStatusText = `<span style="color:#38bdf8;font-weight:600;">🌙 Nachtpause aktiv (Frei bis ${escapeHtml(activeChargeSession.deadline_str)} Uhr)</span>`;
         } else if (remSecs <= 300) {

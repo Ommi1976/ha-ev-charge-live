@@ -60,6 +60,9 @@ def calculate_blocking_deadline(
         else:
             night_start_today = datetime.datetime.combine(curr.date(), datetime.time(night_start_hour, 0), tzinfo=curr.tzinfo)
             mins_until_night = int((night_start_today - curr).total_seconds() / 60)
+            if mins_until_night <= 0:
+                curr = night_start_today
+                continue
             if remaining_mins <= mins_until_night:
                 curr = curr + datetime.timedelta(minutes=remaining_mins)
                 remaining_mins = 0
@@ -90,6 +93,7 @@ class SyncWorker:
         self._candidate_counts: Dict[str, int] = {}
         self._token = os.getenv("SUPERVISOR_TOKEN", "")
         self._lock = asyncio.Lock()
+        self._session_lock = asyncio.Lock()
 
     def start(self) -> None:
         if self._running:
@@ -329,85 +333,86 @@ class SyncWorker:
 
     async def check_charge_session(self) -> None:
         """Evaluates active smart charge session, sends warnings (20m, 5m, fee, SoC) and updates HA sensor."""
-        session = storage.load_charge_session()
-        config = storage.load_config()
+        async with self._session_lock:
+            session = storage.load_charge_session()
+            config = storage.load_config()
 
-        if not session:
-            if getattr(self, "_last_session_active", False):
-                self._last_session_active = False
-                await self._push_session_to_home_assistant(None, config)
-            return
+            if not session:
+                if getattr(self, "_last_session_active", False):
+                    self._last_session_active = False
+                    await self._push_session_to_home_assistant(None, config)
+                return
 
-        self._last_session_active = True
-        now = datetime.datetime.now(tz=BERLIN_TZ)
-        now_ms = int(now.timestamp() * 1000)
+            self._last_session_active = True
+            now = datetime.datetime.now(tz=BERLIN_TZ)
+            now_ms = int(now.timestamp() * 1000)
 
-        start_ms = session.get("start_time_ms") or now_ms
-        try:
-            start_dt = datetime.datetime.fromtimestamp(start_ms / 1000.0, tz=BERLIN_TZ)
-        except Exception:
-            start_dt = now
+            start_ms = session.get("start_time_ms") or now_ms
+            try:
+                start_dt = datetime.datetime.fromtimestamp(start_ms / 1000.0, tz=BERLIN_TZ)
+            except Exception:
+                start_dt = now
 
-        free_mins = int(session.get("free_parking_minutes", 240))
-        night_start = int(session.get("night_window_start", 21))
-        night_end = int(session.get("night_window_end", 9))
-        has_night = session.get("has_night_rule", True)
+            free_mins = int(session.get("free_parking_minutes", 240))
+            night_start = int(session.get("night_window_start", 21))
+            night_end = int(session.get("night_window_end", 9))
+            has_night = session.get("has_night_rule", True)
 
-        if has_night:
-            deadline = calculate_blocking_deadline(start_dt, free_mins, night_start, night_end)
-        else:
-            deadline = start_dt + datetime.timedelta(minutes=free_mins)
+            if has_night:
+                deadline = calculate_blocking_deadline(start_dt, free_mins, night_start, night_end)
+            else:
+                deadline = start_dt + datetime.timedelta(minutes=free_mins)
 
-        diff_sec = (deadline - now).total_seconds()
-        rem_mins = int(diff_sec / 60)
+            diff_sec = (deadline - now).total_seconds()
+            rem_mins = int(diff_sec / 60)
 
-        h = now.hour
-        is_night = (h >= night_start or h < night_end) if has_night else False
+            h = now.hour
+            is_night = (h >= night_start or h < night_end) if has_night else False
 
-        if rem_mins <= 0:
-            state = "Blockiergebühr aktiv"
-        elif is_night:
-            state = "Nachtpause (Frei)"
-        elif rem_mins <= 5:
-            state = "Dringend (5 Min)"
-        elif rem_mins <= 20:
-            state = "Warnung (20 Min)"
-        else:
-            state = "Frei laden"
+            if rem_mins <= 0:
+                state = "Blockiergebühr aktiv"
+            elif is_night:
+                state = "Nachtpause (Frei)"
+            elif rem_mins <= 5:
+                state = "Dringend (5 Min)"
+            elif rem_mins <= 20:
+                state = "Warnung (20 Min)"
+            else:
+                state = "Frei laden"
 
-        # 1. Target SoC notification
-        target_reached_ms = session.get("target_reached_ms")
-        if target_reached_ms and now_ms >= target_reached_ms and not session.get("notified_soc"):
-            session["notified_soc"] = True
+            # 1. Target SoC notification
+            target_reached_ms = session.get("target_reached_ms")
+            if target_reached_ms and now_ms >= target_reached_ms and not session.get("notified_soc"):
+                session["notified_soc"] = True
+                storage.save_charge_session(session)
+                await notifier.notify_charge_guardian(session, "target_soc", config)
+
+            # 2. Blocking fee pre-warnings
+            if not is_night:
+                if rem_mins <= 20 and rem_mins > 5 and not session.get("notified_20"):
+                    session["notified_20"] = True
+                    storage.save_charge_session(session)
+                    await notifier.notify_charge_guardian(session, "warning_20", config)
+                elif rem_mins <= 5 and rem_mins > 0 and not session.get("notified_5"):
+                    session["notified_20"] = True
+                    session["notified_5"] = True
+                    storage.save_charge_session(session)
+                    await notifier.notify_charge_guardian(session, "warning_5", config)
+                elif rem_mins <= 0 and not session.get("notified_fee"):
+                    session["notified_20"] = True
+                    session["notified_5"] = True
+                    session["notified_fee"] = True
+                    storage.save_charge_session(session)
+                    await notifier.notify_charge_guardian(session, "fee_active", config)
+
+            session["remaining_minutes"] = max(0, rem_mins)
+            session["deadline_iso"] = deadline.isoformat()
+            session["deadline_str"] = deadline.strftime("%H:%M")
+            session["is_night_paused"] = is_night
+            session["state"] = state
             storage.save_charge_session(session)
-            await notifier.notify_charge_guardian(session, "target_soc", config)
 
-        # 2. Blocking fee pre-warnings
-        if not is_night:
-            if rem_mins <= 20 and rem_mins > 5 and not session.get("notified_20"):
-                session["notified_20"] = True
-                storage.save_charge_session(session)
-                await notifier.notify_charge_guardian(session, "warning_20", config)
-            elif rem_mins <= 5 and rem_mins > 0 and not session.get("notified_5"):
-                session["notified_20"] = True
-                session["notified_5"] = True
-                storage.save_charge_session(session)
-                await notifier.notify_charge_guardian(session, "warning_5", config)
-            elif rem_mins <= 0 and not session.get("notified_fee"):
-                session["notified_20"] = True
-                session["notified_5"] = True
-                session["notified_fee"] = True
-                storage.save_charge_session(session)
-                await notifier.notify_charge_guardian(session, "fee_active", config)
-
-        session["remaining_minutes"] = max(0, rem_mins)
-        session["deadline_iso"] = deadline.isoformat()
-        session["deadline_str"] = deadline.strftime("%H:%M")
-        session["is_night_paused"] = is_night
-        session["state"] = state
-        storage.save_charge_session(session)
-
-        await self._push_session_to_home_assistant(session, config)
+            await self._push_session_to_home_assistant(session, config)
 
     async def _push_session_to_home_assistant(
         self,
