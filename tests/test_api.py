@@ -52,6 +52,30 @@ class TestApi(unittest.TestCase):
         self.assertIn("coordinates", data)
         self.assertGreater(data["distance_km"], 10.0)
 
+    def test_pairing_info_endpoint(self):
+        resp = self.client.get("/api/pairing-info")
+        self.assertEqual(resp.status_code, 200)
+        data = resp.json()
+        self.assertEqual(data.get("status"), "success")
+        self.assertIn("ha_url", data)
+        self.assertIn("pairing_data", data)
+        self.assertEqual(data["pairing_data"].get("type"), "ha_pairing")
+        self.assertIn("pairing_string", data)
+
+    def test_pairing_qr_svg_generation(self):
+        # Default pairing QR
+        resp = self.client.get("/api/pairing-qr")
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn("image/svg+xml", resp.headers.get("content-type", ""))
+        self.assertTrue(resp.content.startswith(b"<svg"))
+        self.assertTrue(resp.content.rstrip().endswith(b"</svg>"))
+
+        # Custom parameters pairing QR
+        custom_resp = self.client.get("/api/pairing-qr?url=http://192.168.178.50:8123&token=test_bearer_token")
+        self.assertEqual(custom_resp.status_code, 200)
+        self.assertIn("image/svg+xml", custom_resp.headers.get("content-type", ""))
+        self.assertGreater(len(custom_resp.content), 500)
+
 
 if __name__ == "__main__":
     unittest.main()

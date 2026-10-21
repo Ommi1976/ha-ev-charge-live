@@ -2800,6 +2800,108 @@ body.amoled-mode .leaflet-popup-content-wrapper {
     animation: fadeIn 0.18s ease-in;
 }
 
+/* 1-Klick Smartphone-Kopplung (Home Assistant Pairing) */
+.ha-pairing-card {
+    background: linear-gradient(135deg, rgba(200, 122, 62, 0.12) 0%, rgba(18, 24, 32, 0.8) 100%);
+    border: 1px solid rgba(200, 122, 62, 0.4);
+    border-radius: 12px;
+    padding: 14px 16px;
+    margin-bottom: 18px;
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.35);
+}
+
+.ha-pairing-header {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 12px;
+}
+
+.ha-pairing-icon {
+    font-size: 1.8rem;
+    line-height: 1;
+    filter: drop-shadow(0 2px 6px rgba(200, 122, 62, 0.5));
+}
+
+.ha-pairing-title {
+    font-size: 1rem;
+    font-weight: 700;
+    color: #fff;
+    margin-bottom: 2px;
+}
+
+.ha-pairing-sub {
+    font-size: 0.82rem;
+    color: #cbd5e1;
+    line-height: 1.35;
+}
+
+.ha-pairing-action-row {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 10px;
+}
+
+@media (max-width: 480px) {
+    .ha-pairing-action-row {
+        grid-template-columns: 1fr;
+    }
+}
+
+.ha-pairing-qr-box {
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    padding: 14px;
+    background: rgba(0, 0, 0, 0.35);
+    border-radius: 12px;
+    border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.ha-pairing-qr-svg-wrapper {
+    background: #ffffff;
+    padding: 12px;
+    border-radius: 10px;
+    display: inline-flex;
+    justify-content: center;
+    align-items: center;
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.6);
+    min-width: 220px;
+    min-height: 220px;
+}
+
+.ha-pairing-qr-svg-wrapper svg {
+    display: block;
+    width: 200px;
+    height: 200px;
+}
+
+.form-control-compact {
+    width: 100%;
+    padding: 9px 12px;
+    background: rgba(0, 0, 0, 0.4);
+    border: 1px solid rgba(255, 255, 255, 0.15);
+    border-radius: 8px;
+    color: #f1f5f9;
+    font-size: 0.88rem;
+    box-sizing: border-box;
+    transition: border-color 0.2s;
+}
+
+.form-control-compact:focus {
+    border-color: var(--accent-copper, #c87a3e);
+    outline: none;
+    box-shadow: 0 0 0 2px rgba(200, 122, 62, 0.3);
+}
+
+.qr-loading-spinner {
+    font-size: 0.85rem;
+    color: #64748b;
+    padding: 40px 10px;
+    text-align: center;
+}
+
+
 
 
 

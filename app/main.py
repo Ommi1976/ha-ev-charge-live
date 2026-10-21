@@ -1,15 +1,17 @@
 import asyncio
 from contextlib import asynccontextmanager
 import datetime
+import json
 import logging
 import math
 import os
 import re
+import time
 from typing import Any, Dict, List, Optional
 import httpx
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, PlainTextResponse
+from fastapi.responses import HTMLResponse, PlainTextResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from .client import ev_client
@@ -119,6 +121,86 @@ async def update_config(payload: Dict[str, Any]) -> Dict[str, Any]:
     except Exception as err:
         _LOGGER.error("Request failed: %s", err, exc_info=True)
         raise HTTPException(status_code=500, detail="Internal error")
+
+
+@app.get("/api/pairing-info")
+async def get_pairing_info(request: Request) -> Dict[str, Any]:
+    """Returns detected Home Assistant connection info and JSON pairing payload for mobile APK."""
+    config = storage.load_config()
+    cfg_url = str(config.get("ha_server_url") or "").strip()
+    cfg_token = str(config.get("ha_token") or "").strip()
+
+    # Auto-detect base HA URL from Ingress request headers if not explicitly configured
+    proto = request.headers.get("x-forwarded-proto", "http").split(",")[0].strip()
+    host = request.headers.get("x-forwarded-host", "").split(",")[0].strip()
+    if not host:
+        host = request.headers.get("host", "").split(",")[0].strip()
+
+    detected_url = f"{proto}://{host}" if host else ""
+    effective_url = cfg_url or detected_url or "http://homeassistant.local:8123"
+
+    pairing_data = {
+        "type": "ha_pairing",
+        "version": 1,
+        "ha_url": effective_url,
+        "ha_token": cfg_token,
+        "created_at": int(time.time())
+    }
+
+    return {
+        "status": "success",
+        "ha_url": effective_url,
+        "has_token": bool(cfg_token),
+        "detected_url": detected_url,
+        "pairing_data": pairing_data,
+        "pairing_string": json.dumps(pairing_data, separators=(",", ":"))
+    }
+
+
+@app.get("/api/pairing-qr")
+async def get_pairing_qr(
+    request: Request,
+    url: Optional[str] = None,
+    token: Optional[str] = None
+) -> Response:
+    """Generates an SVG QR code for 1-click mobile APK pairing."""
+    try:
+        import qrcode
+        import qrcode.image.svg
+
+        config = storage.load_config()
+        effective_url = (url or config.get("ha_server_url") or "").strip()
+        if not effective_url:
+            proto = request.headers.get("x-forwarded-proto", "http").split(",")[0].strip()
+            host = request.headers.get("x-forwarded-host", "").split(",")[0].strip() or request.headers.get("host", "").split(",")[0].strip()
+            effective_url = f"{proto}://{host}" if host else "http://homeassistant.local:8123"
+
+        effective_token = (token if token is not None else config.get("ha_token") or "").strip()
+
+        payload = {
+            "type": "ha_pairing",
+            "version": 1,
+            "ha_url": effective_url,
+            "ha_token": effective_token
+        }
+        payload_str = json.dumps(payload, separators=(",", ":"))
+
+        qr = qrcode.QRCode(
+            version=None,
+            error_correction=qrcode.constants.ERROR_CORRECT_M,
+            box_size=10,
+            border=2,
+            image_factory=qrcode.image.svg.SvgPathImage
+        )
+        qr.add_data(payload_str)
+        qr.make(fit=True)
+        img = qr.make_image(attrib={"class": "pairing-qr-svg"})
+
+        svg_bytes = img.to_string()
+        return Response(content=svg_bytes, media_type="image/svg+xml")
+    except Exception as err:
+        _LOGGER.error("Failed to generate pairing QR: %s", err, exc_info=True)
+        raise HTTPException(status_code=500, detail="QR generation failed")
 
 
 @app.get("/api/device-location")

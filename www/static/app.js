@@ -161,6 +161,7 @@ let bleConnection = {
     rxChar: null,
     txChar: null,
     connected: false,
+    connecting: false,
     telemetryInterval: null,
     commandLock: false,
     isNative: false,
@@ -170,6 +171,10 @@ let bleConnection = {
     rxCharUuid: null,
     nativeListenerHandle: null
 };
+
+let bleAutoReconnectTimer = null;
+let bleAutoReconnectAttempts = 0;
+let bleManualDisconnected = false;
 
 let parkTimer = null; // { endTimestamp: ms, stationName: '' }
 let parkTimerInterval = null;
@@ -207,6 +212,30 @@ document.addEventListener("DOMContentLoaded", async () => {
         await loadFavorites();
         await loadWatchlist();
     }, 60000);
+
+    // Auto-Reconnect Watchdog bei App-Start (nach 2,5 Sekunden zur Entlastung des Boots)
+    setTimeout(() => {
+        if (!bleConnection.connected && !bleConnection.connecting && !bleManualDisconnected && isObdAutoReconnectEnabled()) {
+            const lastDev = localStorage.getItem("ev_last_ble_device_id");
+            if (lastDev) {
+                obdLog("info", `[Auto-Reconnect] App-Start: Starte automatische Verbindung zu gespeichertem Dongle [${lastDev}]...`);
+                scheduleObdAutoReconnect(1200);
+            }
+        }
+    }, 2500);
+
+    // Reconnect-Check beim Zurückkehren in den Vordergrund (z.B. nach Einsteigen ins Auto)
+    document.addEventListener("visibilitychange", () => {
+        if (!document.hidden) {
+            if (!bleConnection.connected && !bleConnection.connecting && !bleManualDisconnected && isObdAutoReconnectEnabled()) {
+                const lastDev = localStorage.getItem("ev_last_ble_device_id");
+                if (lastDev) {
+                    obdLog("info", "[Auto-Reconnect] App wieder im Vordergrund: Prüfe vLinker-Dongle...");
+                    scheduleObdAutoReconnect(1500);
+                }
+            }
+        }
+    });
 });
 
 // Map Setup
@@ -2702,10 +2731,11 @@ window.clearObdDebugLog = function() {
 window.copyObdDebugLog = async function() {
     const metaEl = document.getElementById("obd-diag-meta");
     const header = [
-        "=== EV Charge Live OBD2 Diagnose-Protokoll (v1.3.14) ===",
+        "=== EV Charge Live OBD2 Diagnose-Protokoll (v1.3.15) ===",
         `Zeitpunkt: ${new Date().toISOString()}`,
         `Treiber-Info: ${metaEl ? metaEl.textContent : "n/a"}`,
-        `Verbindungsstatus: connected=${bleConnection.connected}, transport=${bleConnection.transport || "none"}, deviceId=${bleConnection.deviceId || "none"}`,
+        `Verbindungsstatus: connected=${bleConnection.connected}, connecting=${bleConnection.connecting}, transport=${bleConnection.transport || "none"}, deviceId=${bleConnection.deviceId || "none"}`,
+        `Auto-Reconnect: enabled=${isObdAutoReconnectEnabled()}, attempts=${bleAutoReconnectAttempts}, manualDisc=${bleManualDisconnected}`,
         `Gekoppelte Geräte (${cachedBondedDevices.length}): ${JSON.stringify(cachedBondedDevices)}`,
         "--- LOG VERLAUF ---"
     ].join("\n");
@@ -2737,6 +2767,78 @@ window.copyObdDebugLog = async function() {
     }
     document.body.removeChild(ta);
 };
+
+function isObdAutoReconnectEnabled() {
+    return localStorage.getItem("ev_obd_autoreconnect") !== "false";
+}
+
+window.toggleObdAutoReconnect = function(checked) {
+    localStorage.setItem("ev_obd_autoreconnect", checked ? "true" : "false");
+    obdLog("info", `Auto-Reconnect wurde ${checked ? "AKTIVIERT" : "DEAKTIVIERT"}.`);
+    if (checked) {
+        bleManualDisconnected = false;
+        if (!bleConnection.connected && !bleConnection.connecting) {
+            scheduleObdAutoReconnect(1000);
+        }
+    } else {
+        if (bleAutoReconnectTimer) {
+            clearTimeout(bleAutoReconnectTimer);
+            bleAutoReconnectTimer = null;
+        }
+        const statusPill = document.getElementById("obd-status-pill");
+        if (statusPill && !bleConnection.connected) {
+            statusPill.className = "badge badge-warning";
+            statusPill.textContent = "Nicht verbunden";
+        }
+    }
+};
+
+function scheduleObdAutoReconnect(customDelayMs = null) {
+    if (bleConnection.connected || bleConnection.connecting || bleManualDisconnected) {
+        return;
+    }
+    if (!isObdAutoReconnectEnabled()) {
+        return;
+    }
+
+    if (bleAutoReconnectTimer) {
+        clearTimeout(bleAutoReconnectTimer);
+        bleAutoReconnectTimer = null;
+    }
+
+    let delayMs = customDelayMs;
+    if (delayMs === null) {
+        if (bleAutoReconnectAttempts === 0) delayMs = 5000;
+        else if (bleAutoReconnectAttempts === 1) delayMs = 10000;
+        else delayMs = 20000;
+        bleAutoReconnectAttempts++;
+    }
+
+    const delaySec = Math.round(delayMs / 1000);
+    const statusPill = document.getElementById("obd-status-pill");
+    if (statusPill && !bleConnection.connected) {
+        statusPill.className = "badge badge-warning";
+        statusPill.textContent = `Warte auf Dongle (Auto-Reconnect in ${delaySec}s)...`;
+    }
+
+    obdLog("info", `[Auto-Reconnect] Neuer Verbindungsversuch in ${delaySec}s geplant (Versuch #${bleAutoReconnectAttempts})...`);
+
+    bleAutoReconnectTimer = setTimeout(async () => {
+        bleAutoReconnectTimer = null;
+        if (bleConnection.connected || bleConnection.connecting || bleManualDisconnected) {
+            return;
+        }
+        if (!isObdAutoReconnectEnabled()) {
+            return;
+        }
+        obdLog("info", `[Auto-Reconnect] Führe automatischen Verbindungsversuch #${bleAutoReconnectAttempts} aus...`);
+        try {
+            await connectVlinkerBle(true, true);
+        } catch (e) {
+            // Intern geloggt
+        }
+    }, delayMs);
+}
 
 function ensureObdNativeListeners() {
     if (obdSppListenersRegistered) return;
@@ -2784,6 +2886,9 @@ function isLikelyObdDeviceName(name) {
 
 window.refreshObdBondedDevices = async function(silent = false) {
     ensureObdNativeListeners();
+
+    const chkAuto = document.getElementById("cfg-obd-autoreconnect");
+    if (chkAuto) chkAuto.checked = isObdAutoReconnectEnabled();
 
     const ObdClassic = window.Capacitor?.Plugins?.ObdClassic;
     const BlePlugin = window.Capacitor?.Plugins?.BluetoothLe;
@@ -2892,8 +2997,15 @@ function hexToText(hex) {
     return str;
 }
 
-async function connectVlinkerBle() {
+async function connectVlinkerBle(silent = false, isAutoRetry = false) {
     ensureObdNativeListeners();
+
+    if (bleConnection.connecting) {
+        if (!silent) obdLog("warn", "Verbindungsaufbau läuft bereits...");
+        return;
+    }
+    bleConnection.connecting = true;
+    bleManualDisconnected = false;
 
     const ObdClassic = window.Capacitor?.Plugins?.ObdClassic;
     const BlePlugin = window.Capacitor?.Plugins?.BluetoothLe;
@@ -2901,15 +3013,20 @@ async function connectVlinkerBle() {
     const hasCapacitorBle = Boolean(BlePlugin);
     const hasWebBle = Boolean(navigator.bluetooth);
 
-    // Debug-Panel beim Verbinden automatisch sichtbar machen
-    const debugPanel = document.getElementById("obd-debug-panel");
-    const debugLabel = document.getElementById("obd-debug-toggle-label");
-    if (debugPanel) debugPanel.style.display = "block";
-    if (debugLabel) debugLabel.textContent = "Ausblenden ▲";
+    // Debug-Panel beim manuellen Verbinden automatisch sichtbar machen
+    if (!silent && !isAutoRetry) {
+        const debugPanel = document.getElementById("obd-debug-panel");
+        const debugLabel = document.getElementById("obd-debug-toggle-label");
+        if (debugPanel) debugPanel.style.display = "block";
+        if (debugLabel) debugLabel.textContent = "Ausblenden ▲";
+    }
 
     if (!hasObdClassic && !hasCapacitorBle && !hasWebBle) {
         obdLog("error", "Keine Bluetooth-Schnittstelle verfügbar (weder Native APK noch WebBluetooth).");
-        showToast("Bluetooth wird von diesem Browser nicht unterstützt. Bitte die Android-APK nutzen.", "warning");
+        if (!silent) {
+            showToast("Bluetooth wird von diesem Browser nicht unterstützt. Bitte die Android-APK nutzen.", "warning");
+        }
+        bleConnection.connecting = false;
         return;
     }
 
@@ -3202,6 +3319,12 @@ async function connectVlinkerBle() {
             }
         }
 
+        bleAutoReconnectAttempts = 0;
+        if (bleAutoReconnectTimer) {
+            clearTimeout(bleAutoReconnectTimer);
+            bleAutoReconnectTimer = null;
+        }
+
         if (statusPill) {
             statusPill.className = "badge badge-success";
             statusPill.textContent = bleConnection.transport === "spp" ? "Verbunden (Classic SPP)" : "Verbunden (BLE)";
@@ -3210,7 +3333,11 @@ async function connectVlinkerBle() {
         if (btnDisconnect) btnDisconnect.style.display = "inline-block";
         if (telemetryBox) telemetryBox.style.display = "grid";
 
-        showToast(`⚡ Mit ${bleConnection.device?.name || "vLinker"} (${(bleConnection.transport || "BT").toUpperCase()}) verbunden! Initialisiere...`, "success");
+        if (isAutoRetry) {
+            showToast(`⚡ Mit ${bleConnection.device?.name || "vLinker"} automatisch verbunden!`, "success");
+        } else if (!silent) {
+            showToast(`⚡ Mit ${bleConnection.device?.name || "vLinker"} (${(bleConnection.transport || "BT").toUpperCase()}) verbunden! Initialisiere...`, "success");
+        }
 
         // ELM327 / vLinker / MEB UDS Initialisierung
         obdLog("info", "Sende ELM327/vLinker Initialisierungs-Sequenz...");
@@ -3237,10 +3364,13 @@ async function connectVlinkerBle() {
 
     } catch (err) {
         const msg = err?.message || String(err);
-        obdLog("error", `Verbindungsaufbau abgebrochen: ${msg}`);
-        showToast("Bluetooth-Fehler: " + msg, "warning");
+        obdLog(isAutoRetry ? "info" : "error", `Verbindungsaufbau ${isAutoRetry ? "nicht möglich (Dongle offline/außer Reichweite)" : "abgebrochen"}: ${msg}`);
+        if (!silent) {
+            showToast("Bluetooth-Fehler: " + msg, "warning");
+        }
         onBleDisconnected();
     } finally {
+        bleConnection.connecting = false;
         if (btnConnect) {
             btnConnect.disabled = false;
             btnConnect.innerHTML = `<span class="btn-icon">📡</span> Mit vLinker Bluetooth verbinden`;
@@ -3590,6 +3720,12 @@ async function queryBornTelemetry() {
 }
 
 async function disconnectVlinkerBle() {
+    bleManualDisconnected = true;
+    if (bleAutoReconnectTimer) {
+        clearTimeout(bleAutoReconnectTimer);
+        bleAutoReconnectTimer = null;
+    }
+    bleAutoReconnectAttempts = 0;
     obdLog("info", "Trenne Verbindung zum OBD2-Dongle...");
     if (bleConnection.transport === "spp" && window.Capacitor?.Plugins?.ObdClassic) {
         try {
@@ -3649,6 +3785,10 @@ function onBleDisconnected() {
     if (btnConnect) btnConnect.style.display = "inline-block";
     if (btnDisconnect) btnDisconnect.style.display = "none";
     updateCupraUi();
+
+    if (!bleManualDisconnected && isObdAutoReconnectEnabled()) {
+        scheduleObdAutoReconnect();
+    }
 }
 
 /* ==========================================================================
@@ -4362,14 +4502,25 @@ window.exportLogbookCsv = async function() {
 let qrMediaStream = null;
 let qrScanAnimationId = null;
 
-window.openQrScannerModal = function() {
+window.openQrScannerModal = function(context = null) {
     openModal("modal-qr-scanner");
     const resultBox = document.getElementById("qr-result-box");
     if (resultBox) resultBox.style.display = "none";
     const statusPill = document.getElementById("qr-status");
-    if (statusPill) statusPill.textContent = "Kamera wird initialisiert...";
+    if (statusPill) {
+        statusPill.textContent = context === "ha"
+            ? "Kamera auf den Kopplungs-QR-Code auf dem PC richten..."
+            : "Kamera wird initialisiert...";
+    }
 
-    startQrCamera();
+    const manualInput = document.getElementById("manual-qr-input");
+    if (manualInput) {
+        manualInput.placeholder = context === "ha"
+            ? "HA-Pairing JSON oder Server-URL hier einfügen"
+            : "z.B. DE*SWH*E000123 oder https://ladeapp.de/...";
+    }
+
+    startQrCamera(context);
 };
 
 window.closeQrScannerModal = function() {
@@ -4377,7 +4528,7 @@ window.closeQrScannerModal = function() {
     closeModal("modal-qr-scanner");
 };
 
-async function startQrCamera() {
+async function startQrCamera(context = null) {
     const video = document.getElementById("qr-video");
     const statusPill = document.getElementById("qr-status");
     if (!video) return;
@@ -4394,7 +4545,11 @@ async function startQrCamera() {
         video.srcObject = qrMediaStream;
         await video.play();
 
-        if (statusPill) statusPill.textContent = "Kamera auf QR-Code an der Säule richten...";
+        if (statusPill) {
+            statusPill.textContent = context === "ha"
+                ? "Kamera auf den QR-Code am Bildschirm richten..."
+                : "Kamera auf QR-Code an der Säule richten...";
+        }
         scanQrFrame();
     } catch (err) {
         console.warn("Camera access failed", err);
@@ -4485,6 +4640,48 @@ function onQrCodeScanned(qrText) {
 
     // Analyze scanned text
     const clean = qrText.trim();
+
+    // 0. Prüfen auf Home Assistant 1-Klick Kopplung
+    let isHaPairing = false;
+    let pairingUrl = "";
+    let pairingToken = "";
+
+    try {
+        if (clean.startsWith("{") && clean.endsWith("}")) {
+            const parsed = JSON.parse(clean);
+            if (parsed && (parsed.type === "ha_pairing" || parsed.ha_url || parsed.ha_token)) {
+                isHaPairing = true;
+                pairingUrl = String(parsed.ha_url || "").trim();
+                pairingToken = String(parsed.ha_token || "").trim();
+            }
+        } else if (clean.startsWith("evcharge://pair") || clean.includes("pair?url=")) {
+            const urlObj = new URL(clean.replace("evcharge://", "http://"));
+            pairingUrl = urlObj.searchParams.get("url") || "";
+            pairingToken = urlObj.searchParams.get("token") || "";
+            if (pairingUrl) isHaPairing = true;
+        }
+    } catch (e) {
+        // Nicht als JSON oder Pairing-URL interpretierbar
+    }
+
+    if (isHaPairing && pairingUrl) {
+        localStorage.setItem("ev_ha_server_url", pairingUrl);
+        if (pairingToken) {
+            localStorage.setItem("ev_ha_token", pairingToken);
+        }
+        const haUrlInput = document.getElementById("cfg-ha-server-url");
+        const haTokenInput = document.getElementById("cfg-ha-token");
+        if (haUrlInput) haUrlInput.value = pairingUrl;
+        if (haTokenInput && pairingToken) haTokenInput.value = pairingToken;
+
+        closeQrScannerModal();
+        showToast(`🎉 Home Assistant erfolgreich gekoppelt! Server: ${pairingUrl}`, "success");
+
+        // Sofortige Datenaktualisierung anstoßen
+        searchStations(false);
+        return;
+    }
+
     let evseId = clean;
     let urlTarget = sanitizeHttpUrl(clean.startsWith("http") ? clean : `https://${clean}`, "https://www.enbw.com");
 
@@ -4913,6 +5110,99 @@ window.showRouteOnMainMap = function() {
     map.fitBounds(routePolylineLayer.getBounds(), { padding: [50, 50] });
     showToast("🗺️ Route & Ladestopps auf der Karte eingezeichnet", "info");
 };
+
+/* ==========================================================================
+   Home Assistant 1-Klick Smartphone-Kopplung (QR-Code Generator)
+   ========================================================================== */
+window.showHaPairingQrModal = async function() {
+    openModal("modal-ha-pairing-qr");
+
+    const urlInput = document.getElementById("pairing-modal-url");
+    const tokenInput = document.getElementById("pairing-modal-token");
+
+    let currentUrl = (document.getElementById("cfg-ha-server-url")?.value || localStorage.getItem("ev_ha_server_url") || "").trim();
+    let currentToken = (document.getElementById("cfg-ha-token")?.value || localStorage.getItem("ev_ha_token") || "").trim();
+
+    if (!currentUrl) {
+        try {
+            const resp = await fetch("/api/pairing-info");
+            if (resp.ok) {
+                const info = await resp.json();
+                if (info.ha_url) currentUrl = info.ha_url;
+                if (!currentToken && info.ha_token) currentToken = info.ha_token;
+            }
+        } catch (e) {
+            console.warn("Could not fetch pairing info from backend:", e);
+        }
+    }
+
+    if (!currentUrl) {
+        currentUrl = window.location.origin.includes("localhost") ? "http://homeassistant.local:8123" : window.location.origin;
+    }
+
+    if (urlInput) urlInput.value = currentUrl;
+    if (tokenInput) tokenInput.value = currentToken;
+
+    await renderPairingQrSvg(currentUrl, currentToken);
+};
+
+async function renderPairingQrSvg(url, token) {
+    const svgWrapper = document.getElementById("ha-pairing-qr-svg-wrapper");
+    if (!svgWrapper) return;
+
+    svgWrapper.innerHTML = `<div class="qr-loading-spinner">Generiere QR-Code...</div>`;
+
+    try {
+        const params = new URLSearchParams();
+        if (url) params.set("url", url);
+        if (token) params.set("token", token);
+
+        const resp = await fetch(`/api/pairing-qr?${params.toString()}`);
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        const svgText = await resp.text();
+        svgWrapper.innerHTML = svgText;
+    } catch (err) {
+        svgWrapper.innerHTML = `<div style="color:#ef4444;font-size:0.85rem;padding:20px;">Fehler beim Laden des QR-Codes.<br>${escapeHtml(err.message)}</div>`;
+    }
+}
+
+let pairingQrDebounceTimer = null;
+window.updatePairingQrFromModal = function() {
+    clearTimeout(pairingQrDebounceTimer);
+    pairingQrDebounceTimer = setTimeout(() => {
+        const url = (document.getElementById("pairing-modal-url")?.value || "").trim();
+        const token = (document.getElementById("pairing-modal-token")?.value || "").trim();
+        renderPairingQrSvg(url, token);
+    }, 350);
+};
+
+window.copyPairingJson = function() {
+    const url = (document.getElementById("pairing-modal-url")?.value || "").trim();
+    const token = (document.getElementById("pairing-modal-token")?.value || "").trim();
+    const payload = {
+        type: "ha_pairing",
+        version: 1,
+        ha_url: url,
+        ha_token: token
+    };
+    const jsonStr = JSON.stringify(payload, null, 2);
+
+    const ta = document.createElement("textarea");
+    ta.value = jsonStr;
+    ta.style.position = "fixed";
+    ta.style.opacity = "0";
+    document.body.appendChild(ta);
+    ta.focus();
+    ta.select();
+    try {
+        document.execCommand("copy");
+        showToast("📋 Pairing-JSON in die Zwischenablage kopiert!", "success");
+    } catch (e) {
+        showToast("Kopieren fehlgeschlagen: " + e.message, "error");
+    }
+    document.body.removeChild(ta);
+};
+
 
 
 
