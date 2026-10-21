@@ -134,29 +134,42 @@ class SyncWorker:
                 break
 
     async def sync_favorites(self) -> None:
-        """Fetches live status for all favorited stations and updates Home Assistant with debounce hysteresis."""
+        """Fetches live status for all favorited and watched stations and updates Home Assistant with debounce hysteresis."""
         async with self._lock:
             favorites = storage.load_favorites()
-            if not favorites:
-                _LOGGER.debug("No favorites configured to sync.")
+            watchlist = storage.load_watchlist()
+
+            # Merge favorites and watchlist to ensure all monitored stations are polled
+            stations_to_sync: Dict[str, Dict[str, Any]] = {}
+            for f in favorites:
+                fid = str(f.get("id") or "").strip()
+                if fid:
+                    stations_to_sync[fid] = f
+            for w in watchlist:
+                wid = str(w.get("id") or "").strip()
+                if wid and wid not in stations_to_sync:
+                    stations_to_sync[wid] = w
+
+            if not stations_to_sync:
+                _LOGGER.debug("No favorites or watchlist stations configured to sync.")
                 return
 
             config = storage.load_config()
             live_map: Dict[str, Dict[str, Any]] = {}
+            watch_ids = {str(w.get("id") or "").strip() for w in watchlist if w.get("id")}
+            all_ids = set(stations_to_sync.keys())
 
-            # Drop debounce state of stations that are no longer favorites (bounded memory)
-            fav_ids = {str(f.get("id")) for f in favorites}
+            # Drop debounce state of stations that are neither favorites nor on watchlist (bounded memory)
             for cache in (self._previous_states, self._candidate_keys, self._candidate_counts):
-                for stale in [k for k in cache if k not in fav_ids]:
+                for stale in [k for k in cache if k not in all_ids]:
                     cache.pop(stale, None)
 
-            for fav in favorites:
-                station_id = str(fav.get("id"))
+            for station_id, station_stub in stations_to_sync.items():
                 try:
                     live_station = await ev_client.get_station_by_id(station_id)
                     if not live_station:
                         _LOGGER.warning("Could not fetch station %s, keeping previous state", station_id)
-                        live_map[station_id] = self._previous_states.get(station_id, fav)
+                        live_map[station_id] = self._previous_states.get(station_id, station_stub)
                         continue
 
                     # Check state transition for push notifications and debouncing
@@ -202,7 +215,7 @@ class SyncWorker:
                                     "⚡ Free slot confirmed at %s! (Previous: %d, Now: %d)",
                                     live_station.get("name"), prev_free, curr_free
                                 )
-                                if storage.is_on_watchlist(station_id):
+                                if station_id in watch_ids:
                                     _LOGGER.info("🔔 Station %s is on watchlist -> Sending push notification!", live_station.get("name"))
                                     await notifier.notify_slot_freed(live_station, config)
                                 else:
@@ -227,7 +240,7 @@ class SyncWorker:
 
                 except Exception as err:
                     _LOGGER.error("Failed to sync station %s: %s", station_id, err)
-                    live_map[station_id] = self._previous_states.get(station_id, fav)
+                    live_map[station_id] = self._previous_states.get(station_id, station_stub)
 
             storage.update_favorites_live(live_map)
             storage.update_watchlist_live(live_map)

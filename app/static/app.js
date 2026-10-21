@@ -2702,7 +2702,7 @@ window.clearObdDebugLog = function() {
 window.copyObdDebugLog = async function() {
     const metaEl = document.getElementById("obd-diag-meta");
     const header = [
-        "=== EV Charge Live OBD2 Diagnose-Protokoll (v1.3.13) ===",
+        "=== EV Charge Live OBD2 Diagnose-Protokoll (v1.3.14) ===",
         `Zeitpunkt: ${new Date().toISOString()}`,
         `Treiber-Info: ${metaEl ? metaEl.textContent : "n/a"}`,
         `Verbindungsstatus: connected=${bleConnection.connected}, transport=${bleConnection.transport || "none"}, deviceId=${bleConnection.deviceId || "none"}`,
@@ -3313,7 +3313,7 @@ function parseBleResponse(response) {
         if (hexVal && hexVal.length === 2) {
             const raw = parseInt(hexVal, 16);
             if (!isNaN(raw)) {
-                const soc = Math.min(100, Math.max(0, Math.round(raw / 2.5) || raw));
+                const soc = Math.min(100, Math.max(0, raw <= 100 ? raw : Math.round(raw / 2.55)));
                 cupraState.liveSoc = soc;
                 cupraState.source = "ble";
                 const el = document.getElementById("obd-val-soc");
@@ -3332,7 +3332,7 @@ function parseBleResponse(response) {
         if (hexVal && hexVal.length === 2) {
             const raw = parseInt(hexVal, 16);
             if (!isNaN(raw)) {
-                const realSoc = Math.min(100, Math.max(0, Math.round(raw / 2.5) || raw));
+                const realSoc = Math.min(100, Math.max(0, raw <= 100 ? raw : Math.round(raw / 2.55)));
                 cupraState.realBmsSoc = realSoc;
                 const el = document.getElementById("obd-val-real-soc");
                 if (el) el.textContent = `${realSoc} %`;
@@ -4177,23 +4177,36 @@ async function loadActiveReports() {
     }
 }
 
-window.reportStationPrompt = async function(stationId, stationName) {
-    const choice = prompt(`Meldung für "${stationName}":\n\n1: Ladesäule ZUGEPARKT (Falschparker)\n2: Ladesäule DEFEKT / Störung\n3: Meldung löschen / wieder frei\n\nBitte 1, 2 oder 3 eingeben:`);
-    if (!choice) return;
+let pendingReportStationId = null;
+let pendingReportStationName = "";
 
-    if (choice === "1") {
+window.reportStationPrompt = function(stationId, stationName) {
+    pendingReportStationId = stationId;
+    pendingReportStationName = stationName || "Ladestation";
+    const nameEl = document.getElementById("report-modal-station-name");
+    if (nameEl) nameEl.textContent = `📍 ${pendingReportStationName}`;
+    openModal("modal-report-station");
+};
+
+window.submitStationReport = async function(type) {
+    if (!pendingReportStationId) return;
+    const stationId = pendingReportStationId;
+    const stationName = pendingReportStationName;
+    closeModal("modal-report-station");
+
+    if (type === "blocked") {
         const expiresAt = Date.now() + 2 * 60 * 60 * 1000; // 2 Std. Overlay
         const report = { stationId, stationName, type: "blocked", expiresAt, timestamp: Date.now() };
         await evDb.saveReport(report);
         activeReports[stationId] = report;
         showToast(`⚠️ "${stationName}" für 2h als zugeparkt markiert.`, "warning");
-    } else if (choice === "2") {
+    } else if (type === "defect") {
         const expiresAt = Date.now() + 4 * 60 * 60 * 1000; // 4 Std. Störungs-Overlay
         const report = { stationId, stationName, type: "defect", expiresAt, timestamp: Date.now() };
         await evDb.saveReport(report);
         activeReports[stationId] = report;
         showToast(`⚠️ "${stationName}" für 4h als defekt markiert.`, "error");
-    } else if (choice === "3") {
+    } else if (type === "clear") {
         if (evDb.db) {
             const tx = evDb.db.transaction("station_reports", "readwrite");
             tx.objectStore("station_reports").delete(stationId);
