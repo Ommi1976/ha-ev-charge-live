@@ -36,41 +36,27 @@ function decodePlugStatus(hexVal) {
     return { isConnected, isLocked, isCharging, label };
 }
 
-function calculateClientBlockingDeadline(startDate, freeMinutes, nightStartHour = 21, nightEndHour = 9, hasNightRule = true) {
-    let curr = new Date(startDate.getTime());
-    let remainingMins = Math.max(0, freeMinutes);
-    if (!hasNightRule || remainingMins <= 0) {
-        return new Date(curr.getTime() + remainingMins * 60000);
-    }
-    while (remainingMins > 0) {
-        const h = curr.getHours();
-        const isNight = (nightStartHour > nightEndHour) ? (h >= nightStartHour || h < nightEndHour) : (h >= nightStartHour && h < nightEndHour);
-        if (isNight) {
-            if (h >= nightStartHour) {
-                curr.setDate(curr.getDate() + 1);
-                curr.setHours(nightEndHour, 0, 0, 0);
-            } else {
-                curr.setHours(nightEndHour, 0, 0, 0);
-            }
-        } else {
-            const nightToday = new Date(curr.getTime());
-            nightToday.setHours(nightStartHour, 0, 0, 0);
-            const minsUntilNight = Math.floor((nightToday.getTime() - curr.getTime()) / 60000);
-            if (minsUntilNight <= 0) {
-                curr.setHours(nightStartHour, 0, 0, 0);
-                continue;
-            }
-            if (remainingMins <= minsUntilNight) {
-                curr = new Date(curr.getTime() + remainingMins * 60000);
-                remainingMins = 0;
-            } else {
-                remainingMins -= minsUntilNight;
-                curr = nightToday;
-            }
+// Deadline-Logik wird direkt aus app/static/app.js geladen (keine Kopie), damit der Test den echten Code prüft
+const { calculateClientBlockingDeadline, isNightHour } = (() => {
+    const fs = require("node:fs");
+    const path = require("node:path");
+    const vm = require("node:vm");
+    const src = fs.readFileSync(path.join(__dirname, "..", "app", "static", "app.js"), "utf8");
+    const pick = (name) => {
+        const startIdx = src.indexOf(`function ${name}(`);
+        assert.ok(startIdx >= 0, `${name} nicht in app.js gefunden`);
+        let depth = 0;
+        for (let i = src.indexOf("{", src.indexOf(")", startIdx)); i < src.length; i++) {
+            if (src[i] === "{") depth++;
+            else if (src[i] === "}" && --depth === 0) return src.slice(startIdx, i + 1);
         }
-    }
-    return curr;
-}
+        throw new Error(`${name}: Funktionsende nicht gefunden`);
+    };
+    const code = ["isNightHour", "nextAtHour", "calculateClientBlockingDeadline"].map(pick).join("\n");
+    const ctx = {};
+    vm.runInNewContext(`${code}\nthis.calculateClientBlockingDeadline = calculateClientBlockingDeadline; this.isNightHour = isNightHour;`, ctx);
+    return ctx;
+})();
 
 function parsePairingPayload(rawText) {
     const clean = String(rawText || "").trim();
@@ -178,6 +164,36 @@ test("Park-Wächter: Deadline-Berechnung mit Nachtruhe-Regel", () => {
     const endNoNight = calculateClientBlockingDeadline(startEvening, 240, 21, 9, false);
     assert.equal(endNoNight.getDate(), 21);
     assert.equal(endNoNight.getHours(), 23);
+});
+
+test("Park-Wächter: keine Endlosschleife bei ungewöhnlichen Nachtfenstern", () => {
+    const start = new Date(2026, 9, 21, 10, 0, 0);
+
+    // Nachtfenster innerhalb eines Tages (01-05 Uhr): Start 10:00 + 240 Min. -> 14:00
+    const inDay = calculateClientBlockingDeadline(start, 240, 1, 5, true);
+    assert.equal(inDay.getDate(), 21);
+    assert.equal(inDay.getHours(), 14);
+
+    // Start 23:00, 240 Min. bei Nacht 01-05: 23:00-01:00 = 120 Min., Pause, ab 05:00 Rest 120 -> 07:00
+    const lateStart = new Date(2026, 9, 21, 23, 0, 0);
+    const across = calculateClientBlockingDeadline(lateStart, 240, 1, 5, true);
+    assert.equal(across.getDate(), 22);
+    assert.equal(across.getHours(), 7);
+
+    // Gleiche Start-/Endstunde = keine Nachtregel (früher Endlosschleife)
+    const same = calculateClientBlockingDeadline(start, 90, 0, 0, true);
+    assert.equal(same.getHours(), 11);
+    assert.equal(same.getMinutes(), 30);
+
+    // Ungültige Werte frieren die App nicht ein
+    const bad = calculateClientBlockingDeadline(start, 60, "x", undefined, true);
+    assert.equal(bad.getHours(), 11);
+
+    assert.equal(isNightHour(23, 21, 9), true);
+    assert.equal(isNightHour(12, 21, 9), false);
+    assert.equal(isNightHour(3, 1, 5), true);
+    assert.equal(isNightHour(10, 1, 5), false);
+    assert.equal(isNightHour(0, 0, 0), false);
 });
 
 test("Home Assistant 1-Klick Pairing: Payload-Erkennung", () => {

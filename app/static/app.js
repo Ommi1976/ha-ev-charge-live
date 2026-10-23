@@ -2731,7 +2731,7 @@ window.clearObdDebugLog = function() {
 window.copyObdDebugLog = async function() {
     const metaEl = document.getElementById("obd-diag-meta");
     const header = [
-        "=== EV Charge Live OBD2 Diagnose-Protokoll (v1.3.17) ===",
+        "=== EV Charge Live OBD2 Diagnose-Protokoll (v1.3.18) ===",
         `Zeitpunkt: ${new Date().toISOString()}`,
         `Treiber-Info: ${metaEl ? metaEl.textContent : "n/a"}`,
         `Verbindungsstatus: connected=${bleConnection.connected}, connecting=${bleConnection.connecting}, transport=${bleConnection.transport || "none"}, deviceId=${bleConnection.deviceId || "none"}`,
@@ -3827,40 +3827,43 @@ function onBleDisconnected() {
 let activeChargeSession = null;
 let chargeSessionInterval = null;
 
+function isNightHour(h, nightStartHour, nightEndHour) {
+    if (nightStartHour === nightEndHour) return false;
+    if (nightStartHour > nightEndHour) return h >= nightStartHour || h < nightEndHour;
+    return h >= nightStartHour && h < nightEndHour;
+}
+
+// Next point in time strictly after `curr` with wall-clock time hour:00
+function nextAtHour(curr, hour) {
+    const candidate = new Date(curr.getTime());
+    candidate.setHours(hour, 0, 0, 0);
+    if (candidate.getTime() <= curr.getTime()) candidate.setDate(candidate.getDate() + 1);
+    return candidate;
+}
+
 function calculateClientBlockingDeadline(startDate, freeMinutes, nightStartHour = 21, nightEndHour = 9, hasNightRule = true) {
+    let remainingMins = Math.max(0, Number(freeMinutes) || 0);
+    const ns = ((Number(nightStartHour) % 24) + 24) % 24;
+    const ne = ((Number(nightEndHour) % 24) + 24) % 24;
     let curr = new Date(startDate.getTime());
-    let remainingMins = Math.max(0, freeMinutes);
-    if (!hasNightRule || remainingMins <= 0) {
+    if (!hasNightRule || remainingMins <= 0 || ns === ne || isNaN(ns) || isNaN(ne)) {
         return new Date(curr.getTime() + remainingMins * 60000);
     }
-    while (remainingMins > 0) {
-        const h = curr.getHours();
-        const isNight = (nightStartHour > nightEndHour) ? (h >= nightStartHour || h < nightEndHour) : (h >= nightStartHour && h < nightEndHour);
-        if (isNight) {
-            if (h >= nightStartHour) {
-                curr.setDate(curr.getDate() + 1);
-                curr.setHours(nightEndHour, 0, 0, 0);
-            } else {
-                curr.setHours(nightEndHour, 0, 0, 0);
-            }
-        } else {
-            const nightToday = new Date(curr.getTime());
-            nightToday.setHours(nightStartHour, 0, 0, 0);
-            const minsUntilNight = Math.floor((nightToday.getTime() - curr.getTime()) / 60000);
-            if (minsUntilNight <= 0) {
-                curr.setHours(nightStartHour, 0, 0, 0);
-                continue;
-            }
-            if (remainingMins <= minsUntilNight) {
-                curr = new Date(curr.getTime() + remainingMins * 60000);
-                remainingMins = 0;
-            } else {
-                remainingMins -= minsUntilNight;
-                curr = nightToday;
-            }
+    // Each iteration skips a whole night or consumes a whole day segment; the bound only guards edge cases (DST)
+    for (let i = 0; i < 64; i++) {
+        if (isNightHour(curr.getHours(), ns, ne)) {
+            curr = nextAtHour(curr, ne);
+            continue;
         }
+        const nightBegin = nextAtHour(curr, ns);
+        const minsUntilNight = (nightBegin.getTime() - curr.getTime()) / 60000;
+        if (remainingMins <= minsUntilNight) {
+            return new Date(curr.getTime() + remainingMins * 60000);
+        }
+        remainingMins -= minsUntilNight;
+        curr = nightBegin;
     }
-    return curr;
+    return new Date(curr.getTime() + remainingMins * 60000);
 }
 
 window.startSmartChargeGuardianFromSheet = function() {
@@ -3896,8 +3899,8 @@ window.startSmartChargeGuardianFromSheet = function() {
         connectorLabel: connLabel,
         freeMinutes: feeInfo.freeMinutes,
         feePerMinute: feeInfo.feePerMinute || 0.10,
-        nightStart: feeInfo.nightStart || 21,
-        nightEnd: feeInfo.nightEnd || 9,
+        nightStart: feeInfo.nightStart ?? 21,
+        nightEnd: feeInfo.nightEnd ?? 9,
         hasNightRule: feeInfo.hasNightRule !== false,
         targetSoc: targetSoc,
         startSoc: currentSoc,
@@ -4087,10 +4090,9 @@ function updateStatusBanner() {
 
         const curDate = new Date();
         const curH = curDate.getHours();
-        const nwStart = activeChargeSession.night_window_start || 21;
-        const nwEnd = activeChargeSession.night_window_end || 9;
-        const isNight = Boolean(activeChargeSession.has_night_rule &&
-            ((nwStart > nwEnd) ? (curH >= nwStart || curH < nwEnd) : (curH >= nwStart && curH < nwEnd)));
+        const nwStart = activeChargeSession.night_window_start ?? 21;
+        const nwEnd = activeChargeSession.night_window_end ?? 9;
+        const isNight = Boolean(activeChargeSession.has_night_rule && isNightHour(curH, nwStart, nwEnd));
 
         let feeStatusText = "";
         const feeRate = Number(activeChargeSession.blocking_fee_per_min || 0.10).toFixed(2);
@@ -5155,7 +5157,7 @@ window.showHaPairingQrModal = async function() {
 
     if (!currentUrl) {
         try {
-            const resp = await fetch("/api/pairing-info");
+            const resp = await fetch(getApiUrl("api/pairing-info"));
             if (resp.ok) {
                 const info = await resp.json();
                 if (info.ha_url) currentUrl = info.ha_url;
@@ -5183,11 +5185,12 @@ async function renderPairingQrSvg(url, token) {
     svgWrapper.innerHTML = `<div class="qr-loading-spinner">Generiere QR-Code...</div>`;
 
     try {
-        const params = new URLSearchParams();
-        if (url) params.set("url", url);
-        if (token) params.set("token", token);
-
-        const resp = await fetch(`/api/pairing-qr?${params.toString()}`);
+        // Token goes in the POST body: query strings end up in server access logs
+        const resp = await fetch(getApiUrl("api/pairing-qr"), {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ url: url || null, token: token || null })
+        });
         if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
         const svgText = await resp.text();
         svgWrapper.innerHTML = svgText;

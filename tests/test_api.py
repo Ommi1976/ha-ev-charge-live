@@ -71,7 +71,10 @@ class TestApi(unittest.TestCase):
         self.assertTrue(resp.content.rstrip().endswith(b"</svg>"))
 
         # Custom parameters pairing QR
-        custom_resp = self.client.get("/api/pairing-qr?url=http://192.168.178.50:8123&token=test_bearer_token")
+        custom_resp = self.client.post(
+            "/api/pairing-qr",
+            json={"url": "http://192.168.178.50:8123", "token": "test_bearer_token"}
+        )
         self.assertEqual(custom_resp.status_code, 200)
         self.assertIn("image/svg+xml", custom_resp.headers.get("content-type", ""))
         self.assertGreater(len(custom_resp.content), 500)

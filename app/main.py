@@ -17,7 +17,7 @@ from fastapi.staticfiles import StaticFiles
 from .client import ev_client
 from .notifier import notifier
 from .poller import poller
-from .storage import storage
+from .storage import sanitize_charge_session, storage
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 _LOGGER = logging.getLogger("ev_charge_live.main")
@@ -38,7 +38,13 @@ def _spawn_background(coro) -> None:
     """Keeps a strong reference to fire-and-forget tasks so they are not garbage collected mid-run."""
     task = asyncio.create_task(coro)
     _background_tasks.add(task)
-    task.add_done_callback(_background_tasks.discard)
+    task.add_done_callback(_on_background_done)
+
+
+def _on_background_done(task: "asyncio.Task") -> None:
+    _background_tasks.discard(task)
+    if not task.cancelled() and task.exception() is not None:
+        _LOGGER.error("Background task failed: %s", task.exception())
 
 
 @asynccontextmanager
@@ -162,21 +168,25 @@ async def get_pairing_info(request: Request) -> Dict[str, Any]:
     }
 
 
-@app.get("/api/pairing-qr")
-async def get_pairing_qr(
-    request: Request,
-    url: Optional[str] = Query(None, max_length=512),
-    token: Optional[str] = Query(None, max_length=2048)
-) -> Response:
-    """Generates an SVG QR code for 1-click mobile APK pairing."""
-    # Bounded input validation
-    if url is not None:
-        url_clean = url.strip()
-        if url_clean and not (url_clean.startswith("http://") or url_clean.startswith("https://")):
-            raise HTTPException(status_code=400, detail="Invalid URL scheme. Must start with http:// or https://")
-        if len(url_clean) > 512:
-            raise HTTPException(status_code=400, detail="URL exceeds maximum length of 512 characters")
+def _detect_ha_url(request: Request) -> str:
+    proto = request.headers.get("x-forwarded-proto", "http").split(",")[0].strip().lower()
+    if proto not in ("http", "https"):
+        proto = "http"
+    raw_host = (request.headers.get("x-forwarded-host", "") or request.headers.get("host", "")).split(",")[0].strip()
+    host = raw_host if SAFE_HOST_RE.match(raw_host) else ""
+    return f"{proto}://{host}" if host else "http://homeassistant.local:8123"
 
+
+def _render_pairing_qr(request: Request, url: Optional[str], token: Optional[str]) -> Response:
+    if url is not None and not isinstance(url, str):
+        raise HTTPException(status_code=400, detail="Invalid URL")
+    if token is not None and not isinstance(token, str):
+        raise HTTPException(status_code=400, detail="Invalid token")
+    url_clean = (url or "").strip()
+    if url_clean and not (url_clean.startswith("http://") or url_clean.startswith("https://")):
+        raise HTTPException(status_code=400, detail="Invalid URL scheme. Must start with http:// or https://")
+    if len(url_clean) > 512:
+        raise HTTPException(status_code=400, detail="URL exceeds maximum length of 512 characters")
     if token is not None and len(token) > 2048:
         raise HTTPException(status_code=400, detail="Token exceeds maximum length of 2048 characters")
 
@@ -185,25 +195,13 @@ async def get_pairing_qr(
         import qrcode.image.svg
 
         config = storage.load_config()
-        effective_url = (url or config.get("ha_server_url") or "").strip()
-        if not effective_url:
-            proto = request.headers.get("x-forwarded-proto", "http").split(",")[0].strip().lower()
-            if proto not in ("http", "https"):
-                proto = "http"
-            raw_host = (request.headers.get("x-forwarded-host", "") or request.headers.get("host", "")).split(",")[0].strip()
-            host = raw_host if SAFE_HOST_RE.match(raw_host) else ""
-            effective_url = f"{proto}://{host}" if host else "http://homeassistant.local:8123"
-
-        effective_token = (token if token is not None else config.get("ha_token") or "").strip()
-
+        effective_url = url_clean or str(config.get("ha_server_url") or "").strip() or _detect_ha_url(request)
         payload = {
             "type": "ha_pairing",
             "version": 1,
             "ha_url": effective_url,
-            "ha_token": effective_token
+            "ha_token": (token or "").strip()
         }
-        payload_str = json.dumps(payload, separators=(",", ":"))
-
         qr = qrcode.QRCode(
             version=None,
             error_correction=qrcode.constants.ERROR_CORRECT_M,
@@ -211,17 +209,33 @@ async def get_pairing_qr(
             border=2,
             image_factory=qrcode.image.svg.SvgPathImage
         )
-        qr.add_data(payload_str)
+        qr.add_data(json.dumps(payload, separators=(",", ":")))
         qr.make(fit=True)
         img = qr.make_image(attrib={"class": "pairing-qr-svg"})
-
-        svg_bytes = img.to_string()
-        return Response(content=svg_bytes, media_type="image/svg+xml")
+        # QR contains a long-lived token: never cache it anywhere
+        return Response(content=img.to_string(), media_type="image/svg+xml", headers={"Cache-Control": "no-store"})
     except HTTPException:
         raise
     except Exception as err:
         _LOGGER.error("Failed to generate pairing QR: %s", err, exc_info=True)
         raise HTTPException(status_code=500, detail="QR generation failed")
+
+
+@app.get("/api/pairing-qr")
+async def get_pairing_qr(
+    request: Request,
+    url: Optional[str] = Query(None, max_length=512),
+) -> Response:
+    """SVG pairing QR without token (tokens must be sent via POST, see below)."""
+    if "token" in request.query_params:
+        raise HTTPException(status_code=400, detail="Token must be sent via POST body, not in the URL")
+    return _render_pairing_qr(request, url, None)
+
+
+@app.post("/api/pairing-qr")
+async def post_pairing_qr(request: Request, payload: Dict[str, Any]) -> Response:
+    """Generates an SVG QR code for 1-click mobile APK pairing (token in body, never in the URL/log)."""
+    return _render_pairing_qr(request, payload.get("url"), payload.get("token"))
 
 
 @app.get("/api/device-location")
@@ -443,10 +457,16 @@ async def start_charge_session(session_data: Dict[str, Any]) -> Dict[str, Any]:
     """Starts or updates the active charging session with blocking fee and target SoC monitoring."""
     try:
         now_ms = int(datetime.datetime.now().timestamp() * 1000)
-        session_data["start_time_ms"] = session_data.get("start_time_ms") or now_ms
-        storage.save_charge_session(session_data)
+        clean = sanitize_charge_session(session_data)
+        if not clean.get("station_id") and not clean.get("station_name"):
+            raise HTTPException(status_code=400, detail="station_id or station_name required")
+        # Missing/invalid start time would push the deadline forward on every poll -> never alert
+        clean.setdefault("start_time_ms", now_ms)
+        storage.save_charge_session(clean)
         _spawn_background(poller.check_charge_session())
-        return {"status": "success", "session": session_data}
+        return {"status": "success", "session": clean}
+    except HTTPException:
+        raise
     except Exception as err:
         _LOGGER.error("Failed to start charge session: %s", err, exc_info=True)
         raise HTTPException(status_code=500, detail="Internal error")

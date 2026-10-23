@@ -67,20 +67,77 @@ def sanitize_station(station: Any) -> Dict[str, Any]:
     return clean
 
 
+SESSION_STR_KEYS = (
+    "station_id", "station_name", "connector_label", "target_soc_eta_str",
+    "deadline_str", "deadline_iso", "state",
+)
+SESSION_BOOL_KEYS = ("has_night_rule", "is_night_paused", "notified_soc", "notified_20", "notified_5", "notified_fee")
+# Epoch milliseconds between 2001 and 2096
+SESSION_MS_KEYS = ("start_time_ms", "target_reached_ms", "deadline_ms")
+SESSION_MS_RANGE = (1_000_000_000_000, 4_000_000_000_000)
+
+
+def _safe_int(value: Any, lo: int, hi: int) -> Optional[int]:
+    if isinstance(value, bool):
+        return None
+    try:
+        num = int(float(value))
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return num if lo <= num <= hi else None
+
+
+def charge_session_key(session: Optional[Dict[str, Any]]) -> Optional[tuple]:
+    """Identity of a charge session; used to avoid overwriting a newer/stopped session."""
+    if not session:
+        return None
+    return (str(session.get("station_id") or ""), session.get("start_time_ms"))
+
+
 def sanitize_charge_session(session: Dict[str, Any]) -> Dict[str, Any]:
-    """Validates and bounds charge session parameters to prevent invalid states."""
+    """Reduces an untrusted charge session to known keys with valid types and ranges."""
     if not isinstance(session, dict):
         return {}
-    clean = dict(session)
-    if "target_soc" in clean:
-        clean["target_soc"] = _clamp_int(clean["target_soc"], 10, 100, 80)
-    if "free_parking_minutes" in clean:
-        clean["free_parking_minutes"] = _clamp_int(clean["free_parking_minutes"], 0, 720, 240)
-    if "needed_minutes" in clean:
-        clean["needed_minutes"] = _clamp_int(clean["needed_minutes"], 1, 1440, 60)
-    if "fee_per_minute" in clean:
-        val = _safe_float(clean["fee_per_minute"], 0.0, 10.0)
-        clean["fee_per_minute"] = val if val is not None else 0.10
+    clean: Dict[str, Any] = {}
+
+    for key in SESSION_STR_KEYS:
+        if session.get(key) is not None:
+            clean[key] = str(session[key])[:128 if key == "station_id" else 200]
+
+    for key in SESSION_BOOL_KEYS:
+        if key in session:
+            clean[key] = bool(session[key])
+
+    for key in SESSION_MS_KEYS:
+        if key in session:
+            val = _safe_int(session[key], *SESSION_MS_RANGE)
+            if val is not None:
+                clean[key] = val
+
+    if "target_soc" in session:
+        clean["target_soc"] = _clamp_int(session["target_soc"], 10, 100, 80)
+    if "start_soc" in session:
+        clean["start_soc"] = _clamp_int(session["start_soc"], 0, 100, 50)
+    if "free_parking_minutes" in session:
+        clean["free_parking_minutes"] = _clamp_int(session["free_parking_minutes"], 0, 720, 240)
+    if "needed_minutes" in session:
+        clean["needed_minutes"] = _clamp_int(session["needed_minutes"], 1, 1440, 60)
+    if "remaining_minutes" in session:
+        clean["remaining_minutes"] = _clamp_int(session["remaining_minutes"], 0, 100_000, 0)
+    for key in ("night_window_start", "night_window_end"):
+        if key in session:
+            val = _safe_int(session[key], 0, 23)
+            if val is not None:
+                clean[key] = val
+    for key in ("fee_per_minute", "blocking_fee_per_min"):
+        if key in session:
+            val = _safe_float(session[key], 0.0, 10.0)
+            clean[key] = val if val is not None else 0.10
+    for key, lo, hi in (("latitude", -90.0, 90.0), ("longitude", -180.0, 180.0)):
+        if key in session:
+            val = _safe_float(session[key], lo, hi)
+            if val is not None:
+                clean[key] = val
     return clean
 
 
@@ -382,18 +439,28 @@ class StorageManager:
                 _LOGGER.warning("Failed to load charge session: %s", err)
                 return None
 
-    def save_charge_session(self, session: Optional[Dict[str, Any]]) -> None:
-        """Atomically saves the active charging session."""
+    def save_charge_session(self, session: Optional[Dict[str, Any]], only_if_current: bool = False) -> bool:
+        """Atomically saves the active charging session.
+
+        With only_if_current=True the write is skipped when the stored session was stopped or
+        replaced meanwhile (background poller must never resurrect a stopped session).
+        Returns True when the session was written.
+        """
         with self._lock:
             if session is None:
                 self.clear_charge_session()
-                return
+                return False
+            if only_if_current and charge_session_key(self.load_charge_session()) != charge_session_key(session):
+                _LOGGER.debug("Charge session changed meanwhile; skipping stale write.")
+                return False
             try:
                 clean_session = sanitize_charge_session(session)
                 self._atomic_write_json(SESSION_FILE, clean_session)
-                _LOGGER.info("Saved charge session for station %s", clean_session.get("station_name"))
+                _LOGGER.debug("Saved charge session for station %s", clean_session.get("station_name"))
+                return True
             except Exception as err:
                 _LOGGER.error("Failed to save charge session: %s", err)
+                return False
 
     def clear_charge_session(self) -> None:
         """Removes the active charging session file."""

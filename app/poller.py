@@ -1,6 +1,7 @@
 import asyncio
 import datetime
 import logging
+import math
 import os
 import re
 from typing import Any, Dict, Optional
@@ -36,6 +37,23 @@ def _as_float(value: Any, default: float = 0.0) -> float:
         return default
 
 
+def is_night_hour(hour: int, night_start_hour: int, night_end_hour: int) -> bool:
+    """True if `hour` lies in the fee-free night window; handles windows across midnight (21-9) and within a day (1-5)."""
+    if night_start_hour == night_end_hour:
+        return False
+    if night_start_hour > night_end_hour:
+        return hour >= night_start_hour or hour < night_end_hour
+    return night_start_hour <= hour < night_end_hour
+
+
+def _next_at_hour(curr: datetime.datetime, hour: int) -> datetime.datetime:
+    """Next point in time strictly after `curr` with wall-clock time hour:00."""
+    candidate = curr.replace(hour=hour, minute=0, second=0, microsecond=0)
+    if candidate <= curr:
+        candidate += datetime.timedelta(days=1)
+    return candidate
+
+
 def calculate_blocking_deadline(
     start_dt: datetime.datetime,
     free_minutes: int,
@@ -43,34 +61,27 @@ def calculate_blocking_deadline(
     night_end_hour: int = 9
 ) -> datetime.datetime:
     """Calculates the exact deadline when blocking fees start, taking night exemption into account."""
+    remaining_mins = float(max(0, free_minutes))
+    night_start_hour = int(night_start_hour) % 24
+    night_end_hour = int(night_end_hour) % 24
+    if remaining_mins <= 0 or night_start_hour == night_end_hour:
+        return start_dt + datetime.timedelta(minutes=remaining_mins)
+
     curr = start_dt
-    remaining_mins = max(0, free_minutes)
-    if remaining_mins <= 0:
-        return curr
+    # Every iteration either skips a whole night or consumes a whole day segment, so this
+    # terminates quickly; the bound only guards against unforeseen edge cases (e.g. DST).
+    for _ in range(64):
+        if is_night_hour(curr.hour, night_start_hour, night_end_hour):
+            curr = _next_at_hour(curr, night_end_hour)
+            continue
+        night_begin = _next_at_hour(curr, night_start_hour)
+        mins_until_night = (night_begin - curr).total_seconds() / 60.0
+        if remaining_mins <= mins_until_night:
+            return curr + datetime.timedelta(minutes=remaining_mins)
+        remaining_mins -= mins_until_night
+        curr = night_begin
 
-    while remaining_mins > 0:
-        h = curr.hour
-        is_night = (h >= night_start_hour or h < night_end_hour) if night_start_hour > night_end_hour else (night_start_hour <= h < night_end_hour)
-        if is_night:
-            if h >= night_start_hour:
-                next_day = (curr + datetime.timedelta(days=1)).date()
-                curr = datetime.datetime.combine(next_day, datetime.time(night_end_hour, 0), tzinfo=curr.tzinfo)
-            else:
-                curr = datetime.datetime.combine(curr.date(), datetime.time(night_end_hour, 0), tzinfo=curr.tzinfo)
-        else:
-            night_start_today = datetime.datetime.combine(curr.date(), datetime.time(night_start_hour, 0), tzinfo=curr.tzinfo)
-            mins_until_night = int((night_start_today - curr).total_seconds() / 60)
-            if mins_until_night <= 0:
-                curr = night_start_today
-                continue
-            if remaining_mins <= mins_until_night:
-                curr = curr + datetime.timedelta(minutes=remaining_mins)
-                remaining_mins = 0
-            else:
-                remaining_mins -= mins_until_night
-                curr = night_start_today
-
-    return curr
+    return curr + datetime.timedelta(minutes=remaining_mins)
 
 
 def slugify(text: str) -> str:
@@ -115,13 +126,14 @@ class SyncWorker:
 
     async def _run_loop(self) -> None:
         while self._running:
-            try:
-                await self.sync_favorites()
-                await self.check_charge_session()
-            except asyncio.CancelledError:
-                break
-            except Exception as err:
-                _LOGGER.error("Error in sync loop: %s", err, exc_info=True)
+            # Independent steps: a failing station sync must not silence the charge guardian
+            for step in (self.sync_favorites, self.check_charge_session):
+                try:
+                    await step()
+                except asyncio.CancelledError:
+                    return
+                except Exception as err:
+                    _LOGGER.error("Error in %s: %s", step.__name__, err, exc_info=True)
 
             try:
                 config = storage.load_config()
@@ -366,10 +378,10 @@ class SyncWorker:
             except Exception:
                 start_dt = now
 
-            free_mins = int(session.get("free_parking_minutes", 240))
-            night_start = int(session.get("night_window_start", 21))
-            night_end = int(session.get("night_window_end", 9))
-            has_night = session.get("has_night_rule", True)
+            free_mins = _as_int(session.get("free_parking_minutes"), 240)
+            night_start = _as_int(session.get("night_window_start"), 21) % 24
+            night_end = _as_int(session.get("night_window_end"), 9) % 24
+            has_night = bool(session.get("has_night_rule", True))
 
             if has_night:
                 deadline = calculate_blocking_deadline(start_dt, free_mins, night_start, night_end)
@@ -377,10 +389,10 @@ class SyncWorker:
                 deadline = start_dt + datetime.timedelta(minutes=free_mins)
 
             diff_sec = (deadline - now).total_seconds()
-            rem_mins = int(diff_sec / 60)
+            # Round up: with 30 s left the fee is not active yet
+            rem_mins = math.ceil(diff_sec / 60)
 
-            h = now.hour
-            is_night = (h >= night_start or h < night_end) if has_night else False
+            is_night = has_night and is_night_hour(now.hour, night_start, night_end)
 
             if rem_mins <= 0:
                 state = "Blockiergebühr aktiv"
@@ -393,39 +405,36 @@ class SyncWorker:
             else:
                 state = "Frei laden"
 
+            # Flags are persisted *before* sending (no duplicate pushes) and only if the session
+            # was not stopped/replaced meanwhile (a stopped session must stay stopped).
+            async def _alert(alert_type: str, *flags: str) -> None:
+                for flag in flags:
+                    session[flag] = True
+                if storage.save_charge_session(session, only_if_current=True):
+                    await notifier.notify_charge_guardian(session, alert_type, config)
+
             # 1. Target SoC notification
             target_reached_ms = session.get("target_reached_ms")
             if target_reached_ms and now_ms >= target_reached_ms and not session.get("notified_soc"):
-                session["notified_soc"] = True
-                storage.save_charge_session(session)
-                await notifier.notify_charge_guardian(session, "target_soc", config)
+                await _alert("target_soc", "notified_soc")
 
             # 2. Blocking fee pre-warnings
             if not is_night:
-                if rem_mins <= 20 and rem_mins > 5 and not session.get("notified_20"):
-                    session["notified_20"] = True
-                    storage.save_charge_session(session)
-                    await notifier.notify_charge_guardian(session, "warning_20", config)
-                elif rem_mins <= 5 and rem_mins > 0 and not session.get("notified_5"):
-                    session["notified_20"] = True
-                    session["notified_5"] = True
-                    storage.save_charge_session(session)
-                    await notifier.notify_charge_guardian(session, "warning_5", config)
+                if 5 < rem_mins <= 20 and not session.get("notified_20"):
+                    await _alert("warning_20", "notified_20")
+                elif 0 < rem_mins <= 5 and not session.get("notified_5"):
+                    await _alert("warning_5", "notified_20", "notified_5")
                 elif rem_mins <= 0 and not session.get("notified_fee"):
-                    session["notified_20"] = True
-                    session["notified_5"] = True
-                    session["notified_fee"] = True
-                    storage.save_charge_session(session)
-                    await notifier.notify_charge_guardian(session, "fee_active", config)
+                    await _alert("fee_active", "notified_20", "notified_5", "notified_fee")
 
             session["remaining_minutes"] = max(0, rem_mins)
             session["deadline_iso"] = deadline.isoformat()
             session["deadline_str"] = deadline.strftime("%H:%M")
+            session["deadline_ms"] = int(deadline.timestamp() * 1000)
             session["is_night_paused"] = is_night
             session["state"] = state
-            storage.save_charge_session(session)
-
-            await self._push_session_to_home_assistant(session, config)
+            if storage.save_charge_session(session, only_if_current=True):
+                await self._push_session_to_home_assistant(session, config)
 
     async def _push_session_to_home_assistant(
         self,
