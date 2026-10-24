@@ -101,3 +101,24 @@ action:
     data:
       message: "Achtung: Die Ladestation in der Schubertstraße ist jetzt frei geworden."
 ```
+
+---
+
+## 🛠️ Build & Deploy
+
+Das Frontend wird nur in `app/static/` bearbeitet. `www/` (Web-Assets der Android-App) ist eine Kopie davon und wird per Skript erzeugt.
+
+| Befehl | Was passiert |
+| :--- | :--- |
+| `npm run bump 1.3.19` | Setzt die Version in `config.yaml`, `package.json`, `package-lock.json`, `android/app/build.gradle` (`versionName`, `versionCode` + 1), in den `badge-app-version`-Badges und im Cache-Busting `?v=` von `index.html`. Danach läuft `build:www`. |
+| `npm run build:www` | Prüft, dass alle Versionsangaben übereinstimmen, und kopiert `app/static/` nach `www/`. |
+| `npm run check:versions` | Prüft nur und meldet, wenn `www/` veraltet ist. Läuft auch in der CI. |
+| `npm run apk` | `build:www` → `npx cap sync android` → Gradle `assembleDebug` → `dist/ev-charge-live-v<version>.apk`. Braucht JDK 17 und `ANDROID_HOME`. |
+| `scripts/deploy-ha.sh --dry-run` | Zeigt (in Git Bash), welche Add-on-Dateien übertragen würden, ohne Home Assistant zu kontaktieren. |
+| `scripts/deploy-ha.sh` | Sichert `/addons/ha-ev-charge-live` lokal nach `../ha-ev-charge-live-backups/` und überträgt dann `config.yaml`, `Dockerfile`, `build.yaml`, `run.sh`, `requirements.txt`, `README.md` und `app/` per SSH. |
+
+Nach dem Deploy in Home Assistant den Add-on-Store neu laden und das Add-on `local_ev_charge_live` aktualisieren.
+Ziel, SSH-Key und Backup-Ordner lassen sich über `HA_SSH_TARGET`, `HA_SSH_KEY`, `HA_ADDON_DIR` und `BACKUP_DIR` ändern.
+
+Tests: `pytest tests` und `node tests/test_frontend.js`. Beide laufen bei jedem Push in GitHub Actions (`.github/workflows/tests.yml`).
+APKs sollen künftig als GitHub-Release-Assets statt im Repo liegen, siehe [docs/apk-releases.md](docs/apk-releases.md).

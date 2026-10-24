@@ -1,0 +1,39 @@
+name: Tests
+
+on:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          # Gleiche Python-Version wie im Add-on-Basisimage (build.yaml: base-python:3.11)
+          python-version: '3.11'
+          cache: pip
+
+      - name: Install Python-Abhängigkeiten
+        run: pip install -r requirements.txt pytest
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Versionsangaben & www/-Kopie prüfen
+        run: node scripts/build-www.js --check
+
+      - name: Backend-Tests (pytest)
+        run: pytest tests
+
+      - name: Frontend-Tests
+        run: node tests/test_frontend.js
