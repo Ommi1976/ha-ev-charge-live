@@ -188,7 +188,7 @@
         <div class="modal-content">
             <div class="modal-drag-handle"></div>
             <div class="modal-header">
-                <h2>⚙️ Add-on Konfiguration <span class="badge-app-version">v1.3.21</span></h2>
+                <h2>⚙️ Add-on Konfiguration <span class="badge-app-version">v1.3.22</span></h2>
                 <button class="btn-close" onclick="closeModal('modal-settings')">&times;</button>
             </div>
             <div class="modal-body">
@@ -369,7 +369,7 @@
 
                         <div class="section-title">ℹ️ System &amp; Version</div>
                         <div style="background:rgba(255,255,255,0.04);border:1px solid var(--border-color);border-radius:10px;padding:12px;font-size:0.8rem;line-height:1.6;">
-                            <div><b>EV Charge Live Monitor:</b> <span class="badge-app-version">v1.3.21</span></div>
+                            <div><b>EV Charge Live Monitor:</b> <span class="badge-app-version">v1.3.22</span></div>
                             <div style="color:var(--text-secondary);margin-top:4px;"><b>OBD2 Treiber:</b> Bluetooth Classic SPP (RFCOMM) &amp; BLE Dual-Stack</div>
                             <div style="color:var(--text-secondary);"><b>GitHub Repository:</b> <a href="https://github.com/Ommi1976/ha-ev-charge-live" target="_blank" style="color:var(--accent-color);">Ommi1976/ha-ev-charge-live</a></div>
                         </div>
@@ -389,7 +389,7 @@
         <div class="modal-content">
             <div class="modal-drag-handle"></div>
             <div class="modal-header">
-                <h2>🚗 Cupra Born &amp; vLinker OBD2 <span class="badge-app-version">v1.3.21</span></h2>
+                <h2>🚗 Cupra Born &amp; vLinker OBD2 <span class="badge-app-version">v1.3.22</span></h2>
                 <button class="btn-close" onclick="closeModal('modal-cupra-obd')">&times;</button>
             </div>
             <div class="modal-body">
@@ -459,6 +459,10 @@
                             <div class="telemetry-label">Ladekabel / Stecker</div>
                             <div class="telemetry-value" id="obd-val-plug">--</div>
                         </div>
+                        <div class="telemetry-item">
+                            <div class="telemetry-label">Live-Ladeleistung</div>
+                            <div class="telemetry-value" id="obd-val-power">-- kW</div>
+                        </div>
                     </div>
 
                     <!-- Diagnose & Live-Logging Konsole -->
@@ -470,8 +474,10 @@
                         <div id="obd-debug-panel" class="obd-debug-panel" style="display:block;">
                             <div id="obd-diag-meta" class="obd-diag-meta">Prüfe Bluetooth-Treiber...</div>
                             <div class="obd-debug-toolbar">
-                                <button type="button" class="btn-obd-mini" onclick="refreshObdBondedDevices()">🔍 Gekoppelte prüfen</button>
-                                <button type="button" class="btn-obd-mini" onclick="copyObdDebugLog()">📋 Log kopieren</button>
+                                <button type="button" class="btn-obd-mini" style="font-weight:700;" onclick="wakeUpBornObd()">⚡ Aufwecken</button>
+                                <button type="button" class="btn-obd-mini" onclick="runMebPidScanner()">🔍 MEB-PID-Scan</button>
+                                <button type="button" class="btn-obd-mini" onclick="refreshObdBondedDevices()">📱 Gekoppelte</button>
+                                <button type="button" class="btn-obd-mini" onclick="copyObdDebugLog()">📋 Log</button>
                                 <button type="button" class="btn-obd-mini" onclick="clearObdDebugLog()">🗑️ Leeren</button>
                             </div>
                             <div id="obd-debug-log" class="obd-debug-log"></div>
@@ -484,7 +490,13 @@
                                 <button type="button" class="obd-chip" onclick="sendManualObdCommand('ATI')">ATI</button>
                                 <button type="button" class="obd-chip" onclick="sendManualObdCommand('ATRV')">ATRV (12V)</button>
                                 <button type="button" class="obd-chip" onclick="sendManualObdCommand('ATSH 7E5')">ATSH 7E5</button>
+                                <button type="button" class="obd-chip" onclick="sendManualObdCommand('ATCRA 7ED')">ATCRA 7ED</button>
+                                <button type="button" class="obd-chip" onclick="sendManualObdCommand('10 03')">10 03 (Session)</button>
+                                <button type="button" class="obd-chip" onclick="sendManualObdCommand('3E 00')">3E 00 (Wakeup)</button>
                                 <button type="button" class="obd-chip" onclick="sendManualObdCommand('22 02 8C')">22028C (SoC)</button>
+                                <button type="button" class="obd-chip" onclick="sendManualObdCommand('22 F4 5B')">22F45B (Alt SoC)</button>
+                                <button type="button" class="obd-chip" onclick="sendManualObdCommand('22 1E 32')">221E32 (Volt)</button>
+                                <button type="button" class="obd-chip" onclick="sendManualObdCommand('22 1E 34')">221E34 (Strom)</button>
                                 <button type="button" class="obd-chip" onclick="sendManualObdCommand('22 02 8A')">22028A (SoH)</button>
                             </div>
                         </div>
