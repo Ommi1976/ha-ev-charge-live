@@ -201,7 +201,7 @@ test("UDS Telemetrie: Hochvolt-Batteriespannung (1E 32) & Strom (1E 34) & Live-k
     assert.equal(kw, 20.0);
 });
 
-test("Batterieschutz & Sleep-Safe: 12V Cut-off und 3x No-Data Standby", () => {
+test("Batterieschutz & Sleep-Safe: 12V Cut-off und 4x Zyklus No-Data Standby-Puls", () => {
     // 12V Protection logic verification
     function check12vProtection(v) {
         return v <= 12.1;
@@ -210,16 +210,17 @@ test("Batterieschutz & Sleep-Safe: 12V Cut-off und 3x No-Data Standby", () => {
     assert.equal(check12vProtection(12.1), true);
     assert.equal(check12vProtection(11.8), true);
 
-    // Sleep mode trigger after 3x consecutive NO DATA when not charging
-    function evaluateSleepMode(consecutiveNoData, isCharging) {
-        if (consecutiveNoData >= 3 && !isCharging) return true;
+    // Sleep mode trigger after 4 consecutive full cycles without data when not charging
+    function evaluateSleepMode(consecutiveNoDataCycles, isCharging) {
+        if (consecutiveNoDataCycles >= 4 && !isCharging) return true;
         return false;
     }
     assert.equal(evaluateSleepMode(1, false), false);
     assert.equal(evaluateSleepMode(2, false), false);
-    assert.equal(evaluateSleepMode(3, false), true);
-    assert.equal(evaluateSleepMode(5, false), true);
-    assert.equal(evaluateSleepMode(3, true), false); // Keine Pause bei aktiver Ladung!
+    assert.equal(evaluateSleepMode(3, false), false);
+    assert.equal(evaluateSleepMode(4, false), true);
+    assert.equal(evaluateSleepMode(6, false), true);
+    assert.equal(evaluateSleepMode(4, true), false); // Keine Pause bei aktiver Ladung!
 });
 
 test("Stand- & Blockiergebühr: Stadtwerke Hockenheim und Anbieter mit maxFeeCap", () => {

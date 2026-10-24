@@ -508,7 +508,8 @@ let bleConnection = {
 let bleAutoReconnectTimer = null;
 let bleAutoReconnectAttempts = 0;
 let bleManualDisconnected = false;
-let bleConsecutiveNoDataCount = 0;
+let bleConsecutiveNoDataCycles = 0;
+let bleCurrentCycleGotData = false;
 let bleSleepModeActive = false;
 let ble12vProtectionActive = false;
 
@@ -3732,45 +3733,40 @@ async function connectVlinkerBle(silent = false, isAutoRetry = false) {
         obdLog("info", "Sende ELM327/vLinker Initialisierungs-Sequenz...");
         await sendBleCommand("ATZ");
         await new Promise(r => setTimeout(r, 800));
-        await sendBleCommand("ATI");
-        await new Promise(r => setTimeout(r, 250));
         await sendBleCommand("ATE0");
-        await new Promise(r => setTimeout(r, 200));
+        await new Promise(r => setTimeout(r, 150));
         await sendBleCommand("ATL0");
-        await new Promise(r => setTimeout(r, 200));
+        await new Promise(r => setTimeout(r, 150));
         await sendBleCommand("ATH0");
-        await new Promise(r => setTimeout(r, 200));
-        await sendBleCommand("ATCAF1"); // ISO-TP Automatic Formatting / Flow Control AN
-        await new Promise(r => setTimeout(r, 200));
-        await sendBleCommand("ATST 32"); // Timeout auf 200ms (50 * 4ms) für MEB-Gateway Routing
-        await new Promise(r => setTimeout(r, 200));
-        await sendBleCommand("ATRV"); // 12V Spannung direkt vom Dongle-ADC
-        await new Promise(r => setTimeout(r, 250));
+        await new Promise(r => setTimeout(r, 150));
         await sendBleCommand("ATSP6"); // ISO 15765-4 CAN 11bit 500k
-        await new Promise(r => setTimeout(r, 250));
+        await new Promise(r => setTimeout(r, 200));
+        await sendBleCommand("ATCAF1"); // ISO-TP Auto Formatting & Flow Control
+        await new Promise(r => setTimeout(r, 150));
+        await sendBleCommand("ATAT1"); // Adaptive Timing aktivieren
+        await new Promise(r => setTimeout(r, 150));
+        await sendBleCommand("ATST 64"); // Timeout ~100ms für MEB Gateway
+        await new Promise(r => setTimeout(r, 150));
+        await sendBleCommand("ATCRA"); // Filter zurücksetzen (Auto-Filter aktiv)
+        await new Promise(r => setTimeout(r, 150));
+        await sendBleCommand("ATRV"); // 12V Spannung direkt vom Dongle-ADC
+        await new Promise(r => setTimeout(r, 200));
 
         // Einmaliger Gateway-Weckruf (Broadcast 7DF Mode 01 PID 00 weckt J533 Bus-Routing auf)
-        obdLog("info", "Sende einmaligen Gateway-Weckruf (Broadcast 7DF)...");
+        obdLog("info", "Sende Gateway-Weckruf (Broadcast 7DF)...");
         await sendBleCommand("ATSH 7DF");
         await new Promise(r => setTimeout(r, 200));
         await sendBleCommand("01 00");
         await new Promise(r => setTimeout(r, 250));
 
-        await sendBleCommand("ATSH 7E5"); // Header auf MEB BMS 7E5
-        await new Promise(r => setTimeout(r, 250));
-        await sendBleCommand("ATCRA 7ED"); // CAN Receive Address Filter auf 7ED festzurren
-        await new Promise(r => setTimeout(r, 250));
-        await sendBleCommand("ATFCSH 7E5"); // Flow Control Header 7E5
-        await new Promise(r => setTimeout(r, 200));
-        await sendBleCommand("ATFCSD 30 00 00"); // Flow Control CTS, Block 0, STmin 0
-        await new Promise(r => setTimeout(r, 200));
-        await sendBleCommand("ATFCSM 1"); // Flow Control Mode 1
+        // Primärer BMS-Header 7E5
+        await sendBleCommand("ATSH 7E5");
         await new Promise(r => setTimeout(r, 200));
 
         // MEB UDS Extended Diagnostic Session (10 03) anfordern
         obdLog("info", "Starte UDS Extended Diagnostic Session (10 03) auf MEB BMS...");
         await sendBleCommand("10 03");
-        await new Promise(r => setTimeout(r, 350));
+        await new Promise(r => setTimeout(r, 300));
 
         // Erste Abfrage starten + adaptives Polling (10s)
         await queryBornTelemetry();
@@ -3904,10 +3900,11 @@ function parseBleResponse(response) {
 
     // Bei gültiger UDS-Antwort: No-Data-Zähler zurücksetzen und Standby aufwecken
     if (cleaned.includes("62") || cleaned.includes("5003")) {
-        bleConsecutiveNoDataCount = 0;
+        bleCurrentCycleGotData = true;
+        bleConsecutiveNoDataCycles = 0;
         if (bleSleepModeActive) {
             bleSleepModeActive = false;
-            startBornTelemetryPolling(cupraState.plugState === "charging" ? 10000 : 15000);
+            startBornTelemetryPolling(cupraState.plugState === "charging" ? 10000 : 12000);
             updateObdStatusBadge(bleConnection.transport === "spp" ? "Verbunden (Classic SPP)" : "Verbunden (BLE)", "badge-success");
         }
     }
@@ -3923,24 +3920,12 @@ function parseBleResponse(response) {
         setTimeout(() => { if (bleConnection.connected && !bleConnection.commandLock) sendBleCommand("10 03"); }, 400);
     }
 
-    // Sleep-Safe Handhabung bei 'NO DATA'
+    // Hinweis bei 'NO DATA' (nicht sofort abbrechen, sondern Zyklus-Auswertung überlassen)
     if (cleaned.includes("NODATA")) {
-        bleConsecutiveNoDataCount++;
-        const isCharging = cupraState.plugState === "charging";
-
-        // Nach 3x 'NO DATA' im Stand ohne Ladevorgang: Schlafmodus aktivieren (0% Buslast)
-        if (bleConsecutiveNoDataCount >= 3 && !isCharging && !bleSleepModeActive) {
-            bleSleepModeActive = true;
-            stopBornTelemetryPolling();
-            obdLog("warn", "💤 Cupra Born schläft (3x 'NO DATA' im Stand): Polling zum 12V-Batterieschutz pausiert (0% Buslast). Tippe auf '⚡ Aufwecken' oder starte Ladung.");
-            updateObdStatusBadge("Verbunden (Standby/Schläft)", "badge-warning");
-            return;
-        }
-
         const now = Date.now();
-        if (!window._lastNoDataLog || now - window._lastNoDataLog > 20000) {
+        if (!window._lastNoDataLog || now - window._lastNoDataLog > 25000) {
             window._lastNoDataLog = now;
-            obdLog("warn", "⚠️ Dongle meldet 'NO DATA' auf UDS-Abfrage: Bitte prüfen, ob die Zündung (Ready/Startknopf) im Cupra Born AN ist oder das Ladekabel aktiv lädt.");
+            obdLog("warn", "⚠️ 'NO DATA' auf UDS-Abfrage: Cupra Born schläft noch (Zündung/Ready aus und kein Ladevorgang aktiv).");
         }
     }
 
@@ -4261,10 +4246,8 @@ async function queryBornTelemetry() {
         obdLog("warn", "Abfrage übersprungen: 12V-Batterieschutz aktiv (Spannung <= 12.1 V).");
         return;
     }
-    if (bleSleepModeActive && cupraState.plugState !== "charging") {
-        return;
-    }
     bleConnection.commandLock = true;
+    bleCurrentCycleGotData = false;
     try {
         await sendBleCommand("ATRV");     // 12V Bordnetz direkt via ELM/vLinker ADC
         await new Promise(r => setTimeout(r, 200));
@@ -4274,6 +4257,13 @@ async function queryBornTelemetry() {
 
         await sendBleCommand("3E 00");    // UDS Tester Present (Hält MEB Diagnostic Session 10 03 aktiv)
         await new Promise(r => setTimeout(r, 200));
+
+        // Bei fehlendem SoC oder zyklisch: UDS Extended Session 10 03 anfordern
+        if (cupraState.liveSoc === null || bleConsecutiveNoDataCycles % 3 === 0) {
+            await sendBleCommand("10 03");
+            await new Promise(r => setTimeout(r, 250));
+        }
+
         await sendBleCommand("22 02 8C"); // Display SoC
         await new Promise(r => setTimeout(r, 220));
         await sendBleCommand("22 02 8D"); // BMS SoC
@@ -4290,13 +4280,41 @@ async function queryBornTelemetry() {
         if (cupraState.liveSoc === null) {
             await sendBleCommand("22 F4 5B"); // Alternative Display SoC (MEB 3.x+)
             await new Promise(r => setTimeout(r, 220));
+
+            // Fallback auf On-Board Charger Header 7E4
+            await sendBleCommand("ATSH 7E4");
+            await new Promise(r => setTimeout(r, 150));
+            await sendBleCommand("22 02 8C");
+            await new Promise(r => setTimeout(r, 220));
+            await sendBleCommand("ATSH 7E5"); // Zurück auf BMS
+            await new Promise(r => setTimeout(r, 150));
         }
 
-        // Live-Ladeleistung (U * I) nur abfragen, wenn aktiv geladen wird oder Zündung aktiv ist
+        // Live-Ladeleistung (U * I) abfragen, wenn aktiv geladen wird oder Zündung aktiv ist
         if (cupraState.plugState === "charging" || cupraState.liveSoc !== null) {
             await sendBleCommand("22 1E 32"); // HV-Batteriespannung (Volt)
             await new Promise(r => setTimeout(r, 220));
             await sendBleCommand("22 1E 34"); // HV-Batteriestrom (Ampere)
+        }
+
+        // Zyklus-Auswertung für Standby
+        if (!bleCurrentCycleGotData) {
+            bleConsecutiveNoDataCycles++;
+            const isCharging = cupraState.plugState === "charging";
+            if (bleConsecutiveNoDataCycles >= 4 && !isCharging && !bleSleepModeActive) {
+                bleSleepModeActive = true;
+                obdLog("warn", "💤 Cupra Born schläft noch (4 Zyklen NO DATA): Wechsle in sparsamen Standby-Puls (alle 30s). Sobald Zündung/Ladung aktiv ist, wacht die App automatisch auf.");
+                updateObdStatusBadge("Standby (wartet auf Zündung/Laden)", "badge-warning");
+                startBornTelemetryPolling(30000);
+            }
+        } else {
+            bleConsecutiveNoDataCycles = 0;
+            if (bleSleepModeActive) {
+                bleSleepModeActive = false;
+                obdLog("success", "⚡ Cupra Born aktiv: Schalte auf Live-Telemetrie!");
+                startBornTelemetryPolling(cupraState.plugState === "charging" ? 10000 : 12000);
+                updateObdStatusBadge(bleConnection.transport === "spp" ? "Verbunden (Classic SPP)" : "Verbunden (BLE)", "badge-success");
+            }
         }
     } finally {
         bleConnection.commandLock = false;
@@ -4313,7 +4331,7 @@ window.wakeUpBornObd = async function() {
         return;
     }
     bleSleepModeActive = false;
-    bleConsecutiveNoDataCount = 0;
+    bleConsecutiveNoDataCycles = 0;
     obdLog("info", "🚀 Sende manuellen Aufweck-Befehl (Broadcast 7DF + UDS 10 03)...");
     showToast("Aufweck-Befehl an Cupra Born gesendet...", "info");
     updateObdStatusBadge(bleConnection.transport === "spp" ? "Verbunden (Classic SPP)" : "Verbunden (BLE)", "badge-success");
@@ -4397,7 +4415,8 @@ async function disconnectVlinkerBle() {
 
 function onBleDisconnected() {
     stopBornTelemetryPolling();
-    bleConsecutiveNoDataCount = 0;
+    bleConsecutiveNoDataCycles = 0;
+    bleCurrentCycleGotData = false;
     bleSleepModeActive = false;
     ble12vProtectionActive = false;
     if (bleConnection.rxChar) {
