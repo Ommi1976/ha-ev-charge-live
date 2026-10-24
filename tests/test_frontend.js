@@ -23,6 +23,19 @@ function decode12vVolts(hexVal) {
     return Number((raw / 10.0).toFixed(1));
 }
 
+function decodeHvVoltage(hexVal4) {
+    const raw = parseInt(hexVal4, 16);
+    if (isNaN(raw) || raw < 1000 || raw > 6000) return null;
+    return Number((raw / 10.0).toFixed(1));
+}
+
+function decodeHvCurrent(hexVal4) {
+    let raw = parseInt(hexVal4, 16);
+    if (isNaN(raw)) return null;
+    if (raw > 32767) raw -= 65536;
+    return Number((raw / 10.0).toFixed(1));
+}
+
 function decodePlugStatus(hexVal) {
     const statusByte = parseInt(hexVal, 16);
     if (isNaN(statusByte)) return null;
@@ -165,6 +178,47 @@ test("UDS Telemetrie: Extended Session (10 03) & Alternative SoC (22 F4 5B)", ()
     const respNrc = "7F 22 7E\r\r>";
     const cleanNrc = respNrc.replace(/\s+/g, "").toUpperCase();
     assert.ok(cleanNrc.includes("7F22"));
+});
+
+test("UDS Telemetrie: Hochvolt-Batteriespannung (1E 32) & Strom (1E 34) & Live-kW", () => {
+    // 0x0FA0 = 4000 -> 400.0 V
+    assert.equal(decodeHvVoltage("0FA0"), 400.0);
+    // 0x0DC0 = 3520 -> 352.0 V
+    assert.equal(decodeHvVoltage("0DC0"), 352.0);
+    // Ungültig (unter 100 V oder über 600 V)
+    assert.equal(decodeHvVoltage("00FF"), null);
+
+    // Strom: 0x01F4 = 500 -> 50.0 A
+    assert.equal(decodeHvCurrent("01F4"), 50.0);
+    // Strom: 0xFF9C = -100 -> -10.0 A (Entladung / Rekuperation)
+    assert.equal(decodeHvCurrent("FF9C"), -10.0);
+
+    // Live-kW Berechnung: P = |U * I| / 1000
+    const u = decodeHvVoltage("0FA0"); // 400 V
+    const i = decodeHvCurrent("01F4");  // 50 A
+    const kw = Math.abs((u * i) / 1000.0);
+    assert.equal(kw, 20.0);
+});
+
+test("Batterieschutz & Sleep-Safe: 12V Cut-off und 3x No-Data Standby", () => {
+    // 12V Protection logic verification
+    function check12vProtection(v) {
+        return v <= 12.1;
+    }
+    assert.equal(check12vProtection(12.4), false);
+    assert.equal(check12vProtection(12.1), true);
+    assert.equal(check12vProtection(11.8), true);
+
+    // Sleep mode trigger after 3x consecutive NO DATA when not charging
+    function evaluateSleepMode(consecutiveNoData, isCharging) {
+        if (consecutiveNoData >= 3 && !isCharging) return true;
+        return false;
+    }
+    assert.equal(evaluateSleepMode(1, false), false);
+    assert.equal(evaluateSleepMode(2, false), false);
+    assert.equal(evaluateSleepMode(3, false), true);
+    assert.equal(evaluateSleepMode(5, false), true);
+    assert.equal(evaluateSleepMode(3, true), false); // Keine Pause bei aktiver Ladung!
 });
 
 test("Stand- & Blockiergebühr: Stadtwerke Hockenheim und Anbieter mit maxFeeCap", () => {

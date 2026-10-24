@@ -452,6 +452,9 @@ let cupraState = {
     realBmsSoc: null,
     batteryTemp: null,
     battery12vVoltage: null,
+    hvVoltage: null,
+    hvCurrent: null,
+    livePowerKw: null,
     plugState: "disconnected", // 'disconnected', 'connected', 'locked', 'charging'
     warned12v: false,
     chargeSessionStartSoc: null,
@@ -480,6 +483,9 @@ let bleConnection = {
 let bleAutoReconnectTimer = null;
 let bleAutoReconnectAttempts = 0;
 let bleManualDisconnected = false;
+let bleConsecutiveNoDataCount = 0;
+let bleSleepModeActive = false;
+let ble12vProtectionActive = false;
 
 let parkTimer = null; // { endTimestamp: ms, stationName: '' }
 let parkTimerInterval = null;
@@ -3717,6 +3723,14 @@ async function connectVlinkerBle(silent = false, isAutoRetry = false) {
         await new Promise(r => setTimeout(r, 250));
         await sendBleCommand("ATSP6"); // ISO 15765-4 CAN 11bit 500k
         await new Promise(r => setTimeout(r, 250));
+
+        // Einmaliger Gateway-Weckruf (Broadcast 7DF Mode 01 PID 00 weckt J533 Bus-Routing auf)
+        obdLog("info", "Sende einmaligen Gateway-Weckruf (Broadcast 7DF)...");
+        await sendBleCommand("ATSH 7DF");
+        await new Promise(r => setTimeout(r, 200));
+        await sendBleCommand("01 00");
+        await new Promise(r => setTimeout(r, 250));
+
         await sendBleCommand("ATSH 7E5"); // Header auf MEB BMS 7E5
         await new Promise(r => setTimeout(r, 250));
         await sendBleCommand("ATCRA 7ED"); // CAN Receive Address Filter auf 7ED festzurren
@@ -3733,9 +3747,9 @@ async function connectVlinkerBle(silent = false, isAutoRetry = false) {
         await sendBleCommand("10 03");
         await new Promise(r => setTimeout(r, 350));
 
-        // Erste Abfrage starten + zyklisches Polling alle 8 Sekunden
+        // Erste Abfrage starten + adaptives Polling (10s)
         await queryBornTelemetry();
-        bleConnection.telemetryInterval = setInterval(queryBornTelemetry, 8000);
+        startBornTelemetryPolling(10000);
 
     } catch (err) {
         const msg = err?.message || String(err);
@@ -3782,17 +3796,69 @@ function handleBleNotification(event) {
     handleBleRxChunk(chunk);
 }
 
+function updateObdStatusBadge(text, className) {
+    const statusPill = document.getElementById("obd-status-pill");
+    if (statusPill) {
+        if (className) statusPill.className = "badge " + className;
+        if (text) statusPill.textContent = text;
+    }
+}
+
+function startBornTelemetryPolling(intervalMs = 10000) {
+    stopBornTelemetryPolling();
+    if (!bleConnection.connected) return;
+    bleConnection.telemetryInterval = setInterval(queryBornTelemetry, intervalMs);
+}
+
+function stopBornTelemetryPolling() {
+    if (bleConnection.telemetryInterval) {
+        clearInterval(bleConnection.telemetryInterval);
+        bleConnection.telemetryInterval = null;
+    }
+}
+
+function updateLivePowerUi() {
+    if (cupraState.hvVoltage && cupraState.hvCurrent !== null && cupraState.hvCurrent !== undefined) {
+        // Leistung in kW: P = U * I / 1000
+        const kw = Math.abs((cupraState.hvVoltage * cupraState.hvCurrent) / 1000.0);
+        cupraState.livePowerKw = Number(kw.toFixed(1));
+        const el = document.getElementById("obd-val-power");
+        if (el) {
+            el.textContent = `${cupraState.livePowerKw.toFixed(1)} kW`;
+        }
+        const hudPower = document.getElementById("hud-charge-power");
+        if (hudPower && cupraState.plugState === "charging") {
+            hudPower.textContent = `⚡ ${cupraState.livePowerKw.toFixed(1)} kW`;
+        }
+    }
+}
+
 function update12vDisplay(volts) {
     if (isNaN(volts) || volts < 5 || volts > 20) return;
     cupraState.battery12vVoltage = Number(volts.toFixed(1));
     const el = document.getElementById("obd-val-12v");
     if (el) {
         let badgeColor = "#34d399";
-        if (volts < 11.9) badgeColor = "#ef4444";
-        else if (volts <= 12.3) badgeColor = "#f59e0b";
+        if (volts <= 12.1) badgeColor = "#ef4444";
+        else if (volts <= 12.4) badgeColor = "#f59e0b";
         el.innerHTML = `<span style="color:${badgeColor};font-weight:700;">${volts.toFixed(1)} V</span>`;
     }
-    if (volts < 11.9 && !cupraState.warned12v) {
+
+    // 12V Batterieschutz: Hard-Cutoff bei <= 12.1 V
+    if (volts <= 12.1) {
+        if (!ble12vProtectionActive) {
+            ble12vProtectionActive = true;
+            stopBornTelemetryPolling();
+            obdLog("error", `🛡️ 12V-Batterieschutz aktiviert: Spannung beträgt ${volts.toFixed(1)} V (<= 12.1 V). Alle OBD2-Abfragen zum Schutz der Batterie gestoppt!`);
+            showToast(`🛡️ 12V-Batterieschutz aktiv (${volts.toFixed(1)} V): Polling pausiert.`, "error");
+            updateObdStatusBadge("12V-Schutz aktiv", "badge-danger");
+        }
+    } else if (volts >= 12.5 && ble12vProtectionActive) {
+        ble12vProtectionActive = false;
+        obdLog("success", `🔋 12V-Bordnetzspannung wieder sicher (${volts.toFixed(1)} V). Schutzabschaltung aufgehoben.`);
+        startBornTelemetryPolling(cupraState.plugState === "charging" ? 10000 : 15000);
+        updateObdStatusBadge(bleConnection.transport === "spp" ? "Verbunden (Classic SPP)" : "Verbunden (BLE)", "badge-success");
+    } else if (volts < 11.9 && !cupraState.warned12v) {
         cupraState.warned12v = true;
         showToast(`⚠️ WARNUNG: 12V-Bordnetzbatterie kritisch (${volts.toFixed(1)} V)! Bitte Born einschalten/laden.`, "error");
     }
@@ -3811,6 +3877,16 @@ function parseBleResponse(response) {
 
     const cleaned = response.replace(/\s+/g, "").toUpperCase();
 
+    // Bei gültiger UDS-Antwort: No-Data-Zähler zurücksetzen und Standby aufwecken
+    if (cleaned.includes("62") || cleaned.includes("5003")) {
+        bleConsecutiveNoDataCount = 0;
+        if (bleSleepModeActive) {
+            bleSleepModeActive = false;
+            startBornTelemetryPolling(cupraState.plugState === "charging" ? 10000 : 15000);
+            updateObdStatusBadge(bleConnection.transport === "spp" ? "Verbunden (Classic SPP)" : "Verbunden (BLE)", "badge-success");
+        }
+    }
+
     // MEB BMS UDS Extended Diagnostic Session Positiv-Antwort (10 03 -> 50 03 ...)
     if (cleaned.includes("5003")) {
         obdLog("success", "✅ MEB BMS UDS Extended Diagnostic Session aktiv (50 03)!");
@@ -3822,12 +3898,24 @@ function parseBleResponse(response) {
         setTimeout(() => { if (bleConnection.connected && !bleConnection.commandLock) sendBleCommand("10 03"); }, 400);
     }
 
-    // Hinweis bei 'NO DATA'
+    // Sleep-Safe Handhabung bei 'NO DATA'
     if (cleaned.includes("NODATA")) {
+        bleConsecutiveNoDataCount++;
+        const isCharging = cupraState.plugState === "charging";
+
+        // Nach 3x 'NO DATA' im Stand ohne Ladevorgang: Schlafmodus aktivieren (0% Buslast)
+        if (bleConsecutiveNoDataCount >= 3 && !isCharging && !bleSleepModeActive) {
+            bleSleepModeActive = true;
+            stopBornTelemetryPolling();
+            obdLog("warn", "💤 Cupra Born schläft (3x 'NO DATA' im Stand): Polling zum 12V-Batterieschutz pausiert (0% Buslast). Tippe auf '⚡ Aufwecken' oder starte Ladung.");
+            updateObdStatusBadge("Verbunden (Standby/Schläft)", "badge-warning");
+            return;
+        }
+
         const now = Date.now();
         if (!window._lastNoDataLog || now - window._lastNoDataLog > 20000) {
             window._lastNoDataLog = now;
-            obdLog("warn", "⚠️ Dongle meldet 'NO DATA' auf UDS-Abfrage: Bitte prüfen, ob die Zündung (Ready/Startknopf) im Cupra Born AN ist oder das Ladekabel aktiv lädt (im Stand schaltet das Gateway den BMS-Bus nach ~30s ab).");
+            obdLog("warn", "⚠️ Dongle meldet 'NO DATA' auf UDS-Abfrage: Bitte prüfen, ob die Zündung (Ready/Startknopf) im Cupra Born AN ist oder das Ladekabel aktiv lädt.");
         }
     }
 
@@ -3991,6 +4079,37 @@ function parseBleResponse(response) {
             }
         }
     }
+
+    // Hochvolt-Batteriespannung (PID 1E 32 -> 62 1E 32 [2 BYTES, raw / 10 V])
+    if (cleaned.includes("621E32")) {
+        const idx = cleaned.lastIndexOf("621E32") + 6;
+        const hexVal = cleaned.substring(idx, idx + 4);
+        if (hexVal && hexVal.length === 4) {
+            const raw = parseInt(hexVal, 16);
+            if (!isNaN(raw) && raw > 1000 && raw < 6000) {
+                const volts = Number((raw / 10.0).toFixed(1));
+                cupraState.hvVoltage = volts;
+                obdLog("success", `⚡ HV-Batteriespannung (PID 1E32): ${volts} V (raw=0x${hexVal})`);
+                updateLivePowerUi();
+            }
+        }
+    }
+
+    // Hochvolt-Batteriestrom (PID 1E 34 -> 62 1E 34 [2 BYTES signed / 10 A])
+    if (cleaned.includes("621E34")) {
+        const idx = cleaned.lastIndexOf("621E34") + 6;
+        const hexVal = cleaned.substring(idx, idx + 4);
+        if (hexVal && hexVal.length === 4) {
+            let raw = parseInt(hexVal, 16);
+            if (!isNaN(raw)) {
+                if (raw > 32767) raw -= 65536;
+                const amps = Number((raw / 10.0).toFixed(1));
+                cupraState.hvCurrent = amps;
+                obdLog("success", `⚡ HV-Batteriestrom (PID 1E34): ${amps} A (raw=0x${hexVal})`);
+                updateLivePowerUi();
+            }
+        }
+    }
 }
 
 function handleAutoPlugEvent(prev, current) {
@@ -4113,10 +4232,21 @@ window.sendManualObdCommand = async function(presetCmd) {
 
 async function queryBornTelemetry() {
     if (!bleConnection.connected || bleConnection.commandLock) return;
+    if (ble12vProtectionActive) {
+        obdLog("warn", "Abfrage übersprungen: 12V-Batterieschutz aktiv (Spannung <= 12.1 V).");
+        return;
+    }
+    if (bleSleepModeActive && cupraState.plugState !== "charging") {
+        return;
+    }
     bleConnection.commandLock = true;
     try {
-        await sendBleCommand("ATRV");     // 12V Bordnetz direkt via ELM/vLinker
+        await sendBleCommand("ATRV");     // 12V Bordnetz direkt via ELM/vLinker ADC
         await new Promise(r => setTimeout(r, 200));
+
+        // Falls während ATRV die Unterspannungsschutzabschaltung griff:
+        if (ble12vProtectionActive) return;
+
         await sendBleCommand("3E 00");    // UDS Tester Present (Hält MEB Diagnostic Session 10 03 aktiv)
         await new Promise(r => setTimeout(r, 200));
         await sendBleCommand("22 02 8C"); // Display SoC
@@ -4131,13 +4261,89 @@ async function queryBornTelemetry() {
         await new Promise(r => setTimeout(r, 220));
         await sendBleCommand("22 02 8F"); // Ladekabel / Stecker Status
         await new Promise(r => setTimeout(r, 220));
+
         if (cupraState.liveSoc === null) {
             await sendBleCommand("22 F4 5B"); // Alternative Display SoC (MEB 3.x+)
+            await new Promise(r => setTimeout(r, 220));
+        }
+
+        // Live-Ladeleistung (U * I) nur abfragen, wenn aktiv geladen wird oder Zündung aktiv ist
+        if (cupraState.plugState === "charging" || cupraState.liveSoc !== null) {
+            await sendBleCommand("22 1E 32"); // HV-Batteriespannung (Volt)
+            await new Promise(r => setTimeout(r, 220));
+            await sendBleCommand("22 1E 34"); // HV-Batteriestrom (Ampere)
         }
     } finally {
         bleConnection.commandLock = false;
     }
 }
+
+window.wakeUpBornObd = async function() {
+    if (!bleConnection.connected) {
+        showToast("Bitte zuerst mit dem Dongle verbinden.", "warning");
+        return;
+    }
+    if (ble12vProtectionActive) {
+        showToast("⚠️ 12V-Schutz aktiv! Starten oder laden Sie das Fahrzeug zuerst.", "error");
+        return;
+    }
+    bleSleepModeActive = false;
+    bleConsecutiveNoDataCount = 0;
+    obdLog("info", "🚀 Sende manuellen Aufweck-Befehl (Broadcast 7DF + UDS 10 03)...");
+    showToast("Aufweck-Befehl an Cupra Born gesendet...", "info");
+    updateObdStatusBadge(bleConnection.transport === "spp" ? "Verbunden (Classic SPP)" : "Verbunden (BLE)", "badge-success");
+    try {
+        await sendBleCommand("ATSH 7DF");
+        await new Promise(r => setTimeout(r, 200));
+        await sendBleCommand("01 00");
+        await new Promise(r => setTimeout(r, 250));
+        await sendBleCommand("ATSH 7E5");
+        await new Promise(r => setTimeout(r, 200));
+        await sendBleCommand("10 03");
+        await new Promise(r => setTimeout(r, 300));
+        await queryBornTelemetry();
+        startBornTelemetryPolling(10000);
+    } catch (e) {
+        obdLog("error", `Fehler beim Aufwecken: ${e?.message || e}`);
+    }
+};
+
+window.runMebPidScanner = async function() {
+    if (!bleConnection.connected) {
+        showToast("Bitte zuerst mit dem Dongle verbinden.", "warning");
+        return;
+    }
+    obdLog("info", "🔍 Starte automatischen MEB-PID-Scanner (10 PIDs)...");
+    showToast("Starte MEB-PID-Scan...", "info");
+    const pids = [
+        { pid: "22 02 8C", desc: "Display SoC" },
+        { pid: "22 02 8D", desc: "BMS Real SoC" },
+        { pid: "22 F4 5B", desc: "Display SoC (MEB 3.2+)" },
+        { pid: "22 02 8E", desc: "Akkutemperatur" },
+        { pid: "22 02 88", desc: "12V UDS" },
+        { pid: "22 02 8A", desc: "Batterie SoH" },
+        { pid: "22 1E 3B", desc: "Batterie SoH Alt" },
+        { pid: "22 02 8F", desc: "Stecker-/Ladestatus" },
+        { pid: "22 1E 32", desc: "HV-Spannung (Volt)" },
+        { pid: "22 1E 34", desc: "HV-Strom (Ampere)" }
+    ];
+
+    try {
+        await sendBleCommand("ATSH 7E5");
+        await new Promise(r => setTimeout(r, 150));
+        await sendBleCommand("10 03");
+        await new Promise(r => setTimeout(r, 250));
+
+        for (const item of pids) {
+            await sendBleCommand(item.pid);
+            await new Promise(r => setTimeout(r, 350));
+        }
+        obdLog("success", "✅ MEB-PID-Scan abgeschlossen! Prüfe obige Antworten.");
+        showToast("MEB-PID-Scan abgeschlossen!", "success");
+    } catch (e) {
+        obdLog("error", `Fehler beim PID-Scan: ${e?.message || e}`);
+    }
+};
 
 async function disconnectVlinkerBle() {
     bleManualDisconnected = true;
@@ -4165,10 +4371,10 @@ async function disconnectVlinkerBle() {
 }
 
 function onBleDisconnected() {
-    if (bleConnection.telemetryInterval) {
-        clearInterval(bleConnection.telemetryInterval);
-        bleConnection.telemetryInterval = null;
-    }
+    stopBornTelemetryPolling();
+    bleConsecutiveNoDataCount = 0;
+    bleSleepModeActive = false;
+    ble12vProtectionActive = false;
     if (bleConnection.rxChar) {
         try {
             bleConnection.rxChar.removeEventListener("characteristicvaluechanged", handleBleNotification);
