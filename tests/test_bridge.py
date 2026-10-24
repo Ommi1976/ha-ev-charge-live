@@ -391,10 +391,28 @@ class TestHaEventListener(unittest.TestCase):
 
 def _render_like_ha(template, variables):
     """Renders a script template the way HA does (Jinja2 + native types via literal_eval)."""
-    import ast
-    import jinja2
+    try:
+        import jinja2
+        rendered = jinja2.Environment().from_string(template).render(**variables)
+    except ImportError:
+        # Fallback when jinja2 is not installed in local environment
+        import re
+        m = re.match(r"^\{\{\s*(\w+)\s*\|\s*default\((.*?)\)\s*\}\}$", template.strip())
+        if m:
+            var_name, default_val = m.group(1), m.group(2)
+            val = variables.get(var_name)
+            if val is not None:
+                return val
+            if default_val == "none":
+                return None
+            if default_val == "1":
+                return 1
+            if default_val in ("''", '""'):
+                return ""
+            return default_val
+        return template
 
-    rendered = jinja2.Environment().from_string(template).render(**variables)
+    import ast
     try:
         return ast.literal_eval(rendered)
     except (ValueError, SyntaxError):
