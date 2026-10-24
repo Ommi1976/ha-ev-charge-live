@@ -221,8 +221,10 @@ class SyncWorker:
                             )
                             prev_free = _as_int(prev.get("free_slots"))
                             curr_free = _as_int(live_station.get("free_slots"))
+                            notify_cfg = config.get("notifications", {})
+                            min_free = max(1, _as_int(notify_cfg.get("min_free_slots_to_trigger"), 1))
 
-                            if curr_free > 0 and (prev_free == 0 or curr_free > prev_free):
+                            if curr_free > prev_free and curr_free >= min_free:
                                 _LOGGER.info(
                                     "⚡ Free slot confirmed at %s! (Previous: %d, Now: %d)",
                                     live_station.get("name"), prev_free, curr_free
@@ -232,10 +234,22 @@ class SyncWorker:
                                     await notifier.notify_slot_freed(live_station, config)
                                 else:
                                     _LOGGER.info("ℹ️ Station %s is favorite but NOT on watchlist -> Push suppressed.", live_station.get("name"))
+                            elif curr_free > prev_free:
+                                _LOGGER.debug(
+                                    "Station %s now has %d free slot(s), below min_free_slots_to_trigger=%d -> no push.",
+                                    live_station.get("name"), curr_free, min_free
+                                )
 
-                            notify_cfg = config.get("notifications", {})
-                            if notify_cfg.get("notify_on_all_busy", False) and prev_free > 0 and curr_free == 0:
-                                _LOGGER.info("Station %s confirmed fully occupied.", live_station.get("name"))
+                            if (
+                                notify_cfg.get("notify_on_all_busy", False)
+                                and prev_free > 0 and curr_free == 0
+                                and live_station.get("status") != "OUTOFORDER"
+                            ):
+                                if station_id in watch_ids:
+                                    _LOGGER.info("🔴 Station %s confirmed fully occupied -> Sending push notification.", live_station.get("name"))
+                                    await notifier.notify_all_busy(live_station, config)
+                                else:
+                                    _LOGGER.info("Station %s confirmed fully occupied (not on watchlist, no push).", live_station.get("name"))
 
                             self._previous_states[station_id] = live_station
                             self._candidate_counts.pop(station_id, None)

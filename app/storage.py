@@ -27,6 +27,40 @@ STATION_KEYS = (
     "status", "status_text", "connectors", "live_source", "last_updated", "enbw_station_id",
 )
 
+# Fields that change on (almost) every poll without a real status change ("vor 12 Min.",
+# source timestamps, countdowns). They don't trigger a file rewrite (flash wear on SD/eMMC);
+# their fresh values are kept in memory and persisted with the next real change.
+VOLATILE_STATION_KEYS = ("last_updated",)
+VOLATILE_CONNECTOR_KEYS = ("duration_str", "duration_minutes")
+VOLATILE_SESSION_KEYS = ("remaining_minutes",)
+
+# Options of former versions that no longer exist (dropped from UI overrides / old options.json)
+REMOVED_HA_INTEGRATION_KEYS = ("mqtt_enabled", "mqtt_topic_prefix")
+LOG_LEVELS = ("debug", "info", "warning", "error")
+
+
+def _stable_station(station: Any) -> Any:
+    """Station without volatile fields; used to decide whether a rewrite is necessary."""
+    if not isinstance(station, dict):
+        return station
+    stable = {k: v for k, v in station.items() if k not in VOLATILE_STATION_KEYS}
+    if isinstance(stable.get("connectors"), list):
+        stable["connectors"] = [
+            {k: v for k, v in c.items() if k not in VOLATILE_CONNECTOR_KEYS} if isinstance(c, dict) else c
+            for c in stable["connectors"]
+        ]
+    return stable
+
+
+def _stable_session(session: Dict[str, Any]) -> Dict[str, Any]:
+    return {k: v for k, v in session.items() if k not in VOLATILE_SESSION_KEYS}
+
+
+def _same_content(a: Any, b: Any) -> bool:
+    """Equality as stored on disk (tuple vs. list and key order don't matter)."""
+    return json.dumps(a, sort_keys=True, ensure_ascii=False, default=str) == \
+        json.dumps(b, sort_keys=True, ensure_ascii=False, default=str)
+
 
 def _clamp_int(value: Any, lo: int, hi: int, default: int) -> int:
     try:
@@ -198,12 +232,23 @@ def sanitize_config(cfg: Dict[str, Any]) -> Dict[str, Any]:
                     notify.pop(key)
 
     ha_cfg = cfg.get("home_assistant_integration")
-    if isinstance(ha_cfg, dict) and "entity_prefix" in ha_cfg:
-        prefix = str(ha_cfg.get("entity_prefix") or "").strip().lower()
-        if SAFE_PREFIX_RE.match(prefix) and len(prefix) <= 64:
-            ha_cfg["entity_prefix"] = prefix
+    if isinstance(ha_cfg, dict):
+        for key in REMOVED_HA_INTEGRATION_KEYS:
+            ha_cfg.pop(key, None)
+        if "entity_prefix" in ha_cfg:
+            prefix = str(ha_cfg.get("entity_prefix") or "").strip().lower()
+            if SAFE_PREFIX_RE.match(prefix) and len(prefix) <= 64:
+                ha_cfg["entity_prefix"] = prefix
+            else:
+                ha_cfg.pop("entity_prefix")
+
+    log_cfg = cfg.get("logging")
+    if isinstance(log_cfg, dict) and "level" in log_cfg:
+        level = str(log_cfg.get("level") or "").strip().lower()
+        if level in LOG_LEVELS:
+            log_cfg["level"] = level
         else:
-            ha_cfg.pop("entity_prefix")
+            log_cfg.pop("level")
 
     return cfg
 
@@ -233,9 +278,7 @@ DEFAULT_OPTIONS: Dict[str, Any] = {
     "home_assistant_integration": {
         "entity_prefix": "sensor.ev_charge_",
         "create_device_tracker": True,
-        "fire_ha_events": True,
-        "mqtt_enabled": False,
-        "mqtt_topic_prefix": "homeassistant/sensor/ev_charge"
+        "fire_ha_events": True
     },
     "logging": {
         "level": "info"
@@ -253,6 +296,10 @@ SESSION_FILE = os.path.join(DATA_DIR, "charge_session.json")
 class StorageManager:
     def __init__(self) -> None:
         self._lock = threading.RLock()
+        # Latest live data per station id incl. volatile fields that were not written to disk
+        self._live_stations: Dict[str, Dict[str, Any]] = {}
+        # (session key, volatile fields) of the stored charge session, kept in memory only
+        self._session_volatile: Optional[tuple] = None
         os.makedirs(DATA_DIR, exist_ok=True)
 
     def load_config(self) -> Dict[str, Any]:
@@ -315,18 +362,47 @@ class StorageManager:
             _LOGGER.error("Failed to save config override: %s", err)
             raise
 
-    def load_favorites(self) -> List[Dict[str, Any]]:
-        """Loads list of monitored favorite charging stations."""
+    def _read_station_list(self, path: str, label: str) -> List[Dict[str, Any]]:
+        """Reads a station list exactly as stored on disk."""
         with self._lock:
-            if not os.path.exists(FAVORITES_FILE):
+            if not os.path.exists(path):
                 return []
             try:
-                with open(FAVORITES_FILE, "r", encoding="utf-8") as f:
+                with open(path, "r", encoding="utf-8") as f:
                     data = json.load(f)
                     return data if isinstance(data, list) else []
             except Exception as err:
-                _LOGGER.warning("Failed to load favorites: %s", err)
+                _LOGGER.warning("Failed to load %s: %s", label, err)
                 return []
+
+    def _with_live(self, stations: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Overlays the latest in-memory live data; the stored list decides which stations exist."""
+        return [
+            dict(self._live_stations[str(s.get("id"))]) if str(s.get("id")) in self._live_stations else s
+            for s in stations
+        ]
+
+    def _update_list_live(self, path: str, label: str, live_map: Dict[str, Dict[str, Any]], save) -> bool:
+        """Merges live data into a stored station list; rewrites the file only on real content changes."""
+        if not live_map:
+            return False
+        with self._lock:
+            # The poller always passes all monitored stations, so this also forgets removed ones
+            self._live_stations = dict(live_map)
+            current = self._read_station_list(path, label)
+            if not current:
+                return False
+            merged = [live_map.get(str(item.get("id")), item) for item in current]
+            if _same_content([_stable_station(s) for s in merged], [_stable_station(s) for s in current]):
+                _LOGGER.debug("%s unchanged, skipping write.", label.capitalize())
+                return False
+            save(merged)
+            return True
+
+    def load_favorites(self) -> List[Dict[str, Any]]:
+        """Loads list of monitored favorite charging stations (with latest live data)."""
+        with self._lock:
+            return self._with_live(self._read_station_list(FAVORITES_FILE, "favorites"))
 
     def save_favorites(self, favorites: List[Dict[str, Any]]) -> None:
         """Saves list of monitored favorite charging stations atomically."""
@@ -337,16 +413,12 @@ class StorageManager:
             _LOGGER.error("Failed to save favorites: %s", err)
             raise
 
-    def update_favorites_live(self, live_map: Dict[str, Dict[str, Any]]) -> None:
-        """Updates existing favorites with fresh live data without overwriting concurrent toggle actions."""
-        if not live_map:
-            return
-        with self._lock:
-            current_favs = self.load_favorites()
-            if not current_favs:
-                return
-            merged = [live_map.get(str(f.get("id")), f) for f in current_favs]
-            self.save_favorites(merged)
+    def update_favorites_live(self, live_map: Dict[str, Dict[str, Any]]) -> bool:
+        """Updates existing favorites with fresh live data without overwriting concurrent toggle actions.
+
+        Returns True when favorites.json was rewritten.
+        """
+        return self._update_list_live(FAVORITES_FILE, "favorites", live_map, self.save_favorites)
 
     def is_favorite(self, station_id: str) -> bool:
         favs = self.load_favorites()
@@ -371,17 +443,9 @@ class StorageManager:
                 return True
 
     def load_watchlist(self) -> List[Dict[str, Any]]:
-        """Loads list of stations explicitly placed on the push notification watchlist."""
+        """Loads list of stations explicitly placed on the push notification watchlist (with latest live data)."""
         with self._lock:
-            if not os.path.exists(WATCHLIST_FILE):
-                return []
-            try:
-                with open(WATCHLIST_FILE, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                    return data if isinstance(data, list) else []
-            except Exception as err:
-                _LOGGER.warning("Failed to load watchlist: %s", err)
-                return []
+            return self._with_live(self._read_station_list(WATCHLIST_FILE, "watchlist"))
 
     def save_watchlist(self, watchlist: List[Dict[str, Any]]) -> None:
         """Saves list of watchlist stations atomically."""
@@ -415,19 +479,12 @@ class StorageManager:
                 self.save_watchlist(wl)
                 return True
 
-    def update_watchlist_live(self, live_map: Dict[str, Dict[str, Any]]) -> None:
-        """Updates watchlist items with fresh live data."""
-        if not live_map:
-            return
-        with self._lock:
-            current_wl = self.load_watchlist()
-            if not current_wl:
-                return
-            merged = [live_map.get(str(item.get("id")), item) for item in current_wl]
-            self.save_watchlist(merged)
+    def update_watchlist_live(self, live_map: Dict[str, Dict[str, Any]]) -> bool:
+        """Updates watchlist items with fresh live data. Returns True when watchlist.json was rewritten."""
+        return self._update_list_live(WATCHLIST_FILE, "watchlist", live_map, self.save_watchlist)
 
-    def load_charge_session(self) -> Optional[Dict[str, Any]]:
-        """Loads active charging session (Lade-Wächter)."""
+    def _read_charge_session(self) -> Optional[Dict[str, Any]]:
+        """Reads the charge session exactly as stored on disk."""
         with self._lock:
             if not os.path.exists(SESSION_FILE):
                 return None
@@ -439,23 +496,42 @@ class StorageManager:
                 _LOGGER.warning("Failed to load charge session: %s", err)
                 return None
 
+    def load_charge_session(self) -> Optional[Dict[str, Any]]:
+        """Loads active charging session (Lade-Wächter) incl. in-memory countdown values."""
+        with self._lock:
+            data = self._read_charge_session()
+            if data is not None and self._session_volatile and self._session_volatile[0] == charge_session_key(data):
+                data.update(self._session_volatile[1])
+            return data
+
     def save_charge_session(self, session: Optional[Dict[str, Any]], only_if_current: bool = False) -> bool:
         """Atomically saves the active charging session.
 
         With only_if_current=True the write is skipped when the stored session was stopped or
         replaced meanwhile (background poller must never resurrect a stopped session).
-        Returns True when the session was written.
+        If only volatile fields (countdown) changed, they are kept in memory and the file is
+        left untouched. Returns True when the session is stored (on disk or unchanged).
         """
         with self._lock:
             if session is None:
                 self.clear_charge_session()
                 return False
-            if only_if_current and charge_session_key(self.load_charge_session()) != charge_session_key(session):
+            stored = self._read_charge_session()
+            if only_if_current and charge_session_key(stored) != charge_session_key(session):
                 _LOGGER.debug("Charge session changed meanwhile; skipping stale write.")
                 return False
             try:
                 clean_session = sanitize_charge_session(session)
+                volatile = {k: clean_session[k] for k in VOLATILE_SESSION_KEYS if k in clean_session}
+                if (
+                    stored is not None
+                    and charge_session_key(stored) == charge_session_key(clean_session)
+                    and _same_content(_stable_session(stored), _stable_session(clean_session))
+                ):
+                    self._session_volatile = (charge_session_key(clean_session), volatile)
+                    return True
                 self._atomic_write_json(SESSION_FILE, clean_session)
+                self._session_volatile = None
                 _LOGGER.debug("Saved charge session for station %s", clean_session.get("station_name"))
                 return True
             except Exception as err:
@@ -465,6 +541,7 @@ class StorageManager:
     def clear_charge_session(self) -> None:
         """Removes the active charging session file."""
         with self._lock:
+            self._session_volatile = None
             try:
                 if os.path.exists(SESSION_FILE):
                     os.remove(SESSION_FILE)
