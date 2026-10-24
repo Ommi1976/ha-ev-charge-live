@@ -22,6 +22,25 @@ from .storage import sanitize_charge_session, storage
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 _LOGGER = logging.getLogger("ev_charge_live.main")
 
+LOG_LEVELS = {"debug": logging.DEBUG, "info": logging.INFO, "warning": logging.WARNING, "error": logging.ERROR}
+
+
+def apply_log_level(config: Dict[str, Any]) -> int:
+    """Applies the `logging.level` option; returns the effective level of the add-on loggers."""
+    name = str((config.get("logging") or {}).get("level") or "info").strip().lower()
+    level = LOG_LEVELS.get(name, logging.INFO)
+    logging.getLogger("ev_charge_live").setLevel(level)
+    # Libraries follow stricter levels but never drop to DEBUG (would flood the add-on log)
+    for lib in ("", "uvicorn", "uvicorn.error", "uvicorn.access"):
+        logging.getLogger(lib).setLevel(max(level, logging.INFO))
+    # httpx/httpcore log every single request on INFO
+    for lib in ("httpx", "httpcore"):
+        logging.getLogger(lib).setLevel(max(level, logging.WARNING))
+    return level
+
+
+apply_log_level(storage.load_config())
+
 SAFE_HA_ENTITY_RE = re.compile(r"^[a-z0-9_]+\.[a-z0-9_]+$")
 SAFE_NOTIFY_RE = re.compile(r"^notify\.[a-z0-9_]+$")
 SAFE_HOST_RE = re.compile(r"^[a-zA-Z0-9.\-_]+(?::\d{1,5})?$")
@@ -122,7 +141,9 @@ async def update_config(payload: Dict[str, Any]) -> Dict[str, Any]:
     """Saves updated user configuration."""
     try:
         storage.save_config_override(payload)
-        return {"status": "success", "config": storage.load_config()}
+        config = storage.load_config()
+        apply_log_level(config)
+        return {"status": "success", "config": config}
     except ValueError as verr:
         raise HTTPException(status_code=400, detail=str(verr))
     except Exception as err:

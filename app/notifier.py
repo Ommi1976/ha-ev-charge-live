@@ -16,9 +16,18 @@ class _SafeFormatDict(dict):
         return "{" + key + "}"
 
 
+def _cooldown_seconds(notify_cfg: Dict[str, Any]) -> float:
+    try:
+        return float(notify_cfg.get("cooldown_minutes", 10)) * 60
+    except (TypeError, ValueError):
+        return 600.0
+
+
 class HANotifier:
     def __init__(self) -> None:
         self._last_notified: Dict[str, datetime.datetime] = {}
+        # Separate cooldown so a "fully occupied" push never suppresses the next "slot freed" push
+        self._last_busy_notified: Dict[str, datetime.datetime] = {}
         self._token = os.getenv("SUPERVISOR_TOKEN", "")
 
     def _get_headers(self) -> Dict[str, str]:
@@ -26,6 +35,24 @@ class HANotifier:
         if self._token:
             headers["Authorization"] = f"Bearer {self._token}"
         return headers
+
+    async def _send_to_targets(self, notify_cfg: Dict[str, Any], payload: Dict[str, Any]) -> bool:
+        """Calls the notify service of every configured target device; True if at least one succeeded."""
+        target_devices = notify_cfg.get("target_devices")
+        if not target_devices or not isinstance(target_devices, list):
+            single_svc = notify_cfg.get("service", "notify.mobile_app_2407fpn8eg")
+            target_devices = [single_svc] if single_svc else ["notify.mobile_app_2407fpn8eg"]
+
+        success = False
+        for dev_str in dict.fromkeys(str(d).strip().lower() for d in target_devices):
+            # Only notify.* services may be called from (UI-editable) config
+            if not SAFE_NOTIFY_RE.match(dev_str):
+                _LOGGER.warning("Ignoring invalid notify target: %r", dev_str)
+                continue
+            service = dev_str.split(".", 1)[1]
+            if await self._call_service("notify", service, payload):
+                success = True
+        return success
 
     async def notify_slot_freed(
         self,
@@ -39,19 +66,16 @@ class HANotifier:
             return False
 
         station_id = str(station.get("id"))
-        try:
-            cooldown_min = float(notify_cfg.get("cooldown_minutes", 10))
-        except (TypeError, ValueError):
-            cooldown_min = 10.0
+        cooldown_sec = _cooldown_seconds(notify_cfg)
         now = datetime.datetime.now()
 
         # Cooldown check
         if not force and station_id in self._last_notified:
             diff = (now - self._last_notified[station_id]).total_seconds()
-            if diff < (cooldown_min * 60):
+            if diff < cooldown_sec:
                 _LOGGER.debug(
                     "Skipping notification for station %s (cooldown active: %.0fs remaining)",
-                    station_id, (cooldown_min * 60) - diff
+                    station_id, cooldown_sec - diff
                 )
                 return False
 
@@ -109,11 +133,6 @@ class HANotifier:
             }
         ]
 
-        target_devices = notify_cfg.get("target_devices")
-        if not target_devices or not isinstance(target_devices, list):
-            single_svc = notify_cfg.get("service", "notify.mobile_app_2407fpn8eg")
-            target_devices = [single_svc] if single_svc else ["notify.mobile_app_2407fpn8eg"]
-
         notify_payload = {
             "title": title,
             "message": message,
@@ -126,16 +145,7 @@ class HANotifier:
         }
 
         # 1. Call Notify Service for each configured target device
-        success = False
-        for dev_str in dict.fromkeys(str(d).strip().lower() for d in target_devices):
-            # Only notify.* services may be called from (UI-editable) config
-            if not SAFE_NOTIFY_RE.match(dev_str):
-                _LOGGER.warning("Ignoring invalid notify target: %r", dev_str)
-                continue
-            service = dev_str.split(".", 1)[1]
-            ok = await self._call_service("notify", service, notify_payload)
-            if ok:
-                success = True
+        success = await self._send_to_targets(notify_cfg, notify_payload)
 
         # 2. Fire HA Event for custom automations
         ha_cfg = config.get("home_assistant_integration", {})
@@ -157,6 +167,45 @@ class HANotifier:
             return True
 
         return False
+
+    async def notify_all_busy(self, station: Dict[str, Any], config: Dict[str, Any]) -> bool:
+        """Sends a push when a watched station became fully occupied (option notify_on_all_busy)."""
+        notify_cfg = config.get("notifications", {})
+        if not notify_cfg.get("enabled", True) or not notify_cfg.get("notify_on_all_busy", False):
+            return False
+
+        station_id = str(station.get("id"))
+        now = datetime.datetime.now()
+        last = self._last_busy_notified.get(station_id)
+        if last and (now - last).total_seconds() < _cooldown_seconds(notify_cfg):
+            _LOGGER.debug("Skipping all-busy notification for station %s (cooldown active)", station_id)
+            return False
+
+        station_name = station.get("name") or station.get("address") or "Ladestation"
+        address = station.get("address") or ""
+        total_slots = station.get("total_slots", 0)
+        lat = station.get("latitude")
+        lon = station.get("longitude")
+        gmaps_url = f"https://www.google.com/maps/dir/?api=1&destination={lat},{lon}" if lat and lon else "/ev_charge_live"
+
+        title = f"🔴 Ladestation belegt: {station_name}"
+        message = f"An {station_name} ({address}) sind jetzt alle {total_slots} Plätze belegt."
+        notify_payload = {
+            "title": title,
+            "message": message,
+            "data": {
+                # Same tag as the "slot freed" push: replaces the outdated "frei" notification on the phone
+                "tag": f"ev_charge_{station_id}",
+                "url": gmaps_url,
+                "clickAction": gmaps_url
+            }
+        }
+
+        if not await self._send_to_targets(notify_cfg, notify_payload):
+            return False
+        self._last_busy_notified[station_id] = now
+        _LOGGER.info("Sent all-busy notification for station %s: %s", station_id, title)
+        return True
 
     async def notify_charge_guardian(
         self,
@@ -199,11 +248,6 @@ class HANotifier:
         ]
 
         notify_cfg = config.get("notifications", {})
-        target_devices = notify_cfg.get("target_devices")
-        if not target_devices or not isinstance(target_devices, list):
-            single_svc = notify_cfg.get("service", "notify.mobile_app_2407fpn8eg")
-            target_devices = [single_svc] if single_svc else ["notify.mobile_app_2407fpn8eg"]
-
         notify_payload = {
             "title": title,
             "message": message,
@@ -215,14 +259,7 @@ class HANotifier:
             }
         }
 
-        success = False
-        for dev_str in dict.fromkeys(str(d).strip().lower() for d in target_devices):
-            if not SAFE_NOTIFY_RE.match(dev_str):
-                continue
-            service = dev_str.split(".", 1)[1]
-            ok = await self._call_service("notify", service, notify_payload)
-            if ok:
-                success = True
+        success = await self._send_to_targets(notify_cfg, notify_payload)
 
         ha_cfg = config.get("home_assistant_integration", {})
         if ha_cfg.get("fire_ha_events", True):

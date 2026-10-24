@@ -1,7 +1,7 @@
 name: "EV Charge Live Monitor"
 slug: "ev_charge_live"
 description: "Echtzeit-Belegungsmonitor für E-Auto-Ladestationen (inkl. Stadtwerke Hockenheim) mit interaktiver Ingress-Karte, Favoriten und Push-Benachrichtigungen."
-version: "1.3.18"
+version: "1.3.19"
 url: "https://github.com/Ommi1976/ha-ev-charge-live"
 startup: "application"
 boot: "auto"
@@ -39,8 +39,6 @@ schema:
     entity_prefix: "str"
     create_device_tracker: "bool"
     fire_ha_events: "bool"
-    mqtt_enabled: "bool"
-    mqtt_topic_prefix: "str"
   logging:
     level: "list(debug|info|warning|error)"
 
@@ -67,7 +65,5 @@ options:
     entity_prefix: "sensor.ev_charge_"
     create_device_tracker: true
     fire_ha_events: true
-    mqtt_enabled: false
-    mqtt_topic_prefix: "homeassistant/sensor/ev_charge"
   logging:
     level: "info"

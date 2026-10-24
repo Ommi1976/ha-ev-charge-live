@@ -61,11 +61,22 @@ Speziell vorkonfiguriert für alle Ladestationen der **Stadtwerke Hockenheim** s
 | `notifications.enabled` | `true` | Push-Benachrichtigungen bei freiem Slot aktivieren. |
 | `notifications.service` | `notify.notify` | Zielservice (z. B. `notify.mobile_app_stephan`). |
 | `notifications.cooldown_minutes` | `10` | Mindestzeit zwischen zwei Meldungen pro Station. |
+| `notifications.min_free_slots_to_trigger` | `1` | Push „Platz frei“ erst, wenn mindestens so viele Plätze frei sind (1–10). Gemeldet wird, sobald die Zahl freier Plätze steigt und die Schwelle erreicht oder überschreitet; bei `2` löst also `0 → 1` nichts aus, `1 → 2` schon. |
+| `notifications.notify_on_all_busy` | `false` | Zusätzlicher Push „🔴 Ladestation belegt“, wenn eine Station der Watchlist vollständig belegt wird (nicht bei „Außer Betrieb“). Ersetzt auf dem Handy die ältere „frei“-Meldung derselben Station; eigener Cooldown, blockiert also nie die nächste „frei“-Meldung. |
 | `notifications.title_template` | `⚡ Ladestation frei: {station_name}` | Titel der Push-Nachricht. |
 | `notifications.message_template` | `An {station_name} ({address}) sind jetzt {free_slots} von {total_slots} Plätzen frei!` | Text der Push-Nachricht. |
 | `home_assistant_integration.entity_prefix` | `sensor.ev_charge_` | Präfix für generierte Sensoren. |
 | `home_assistant_integration.create_device_tracker`| `true` | Zeigt Säulen als Device Tracker auf der HA-Karte. |
 | `home_assistant_integration.fire_ha_events` | `true` | Feuert `ev_charge_slot_freed` im Eventbus. |
+| `logging.level` | `info` | Log-Level des Add-ons (`debug`, `info`, `warning`, `error`). `debug` gilt nur für die Add-on-eigenen Logger; `httpx`/`httpcore` loggen höchstens Warnungen (keine Zeile pro HTTP-Anfrage mehr), `warning`/`error` gelten auch für Uvicorn inkl. Zugriffslog. |
+
+Push-Meldungen (frei/belegt) gehen nur an Stationen auf der **Watchlist**; reine Favoriten aktualisieren lediglich ihren Sensor.
+
+> **Entfernt in 1.3.19:** `home_assistant_integration.mqtt_enabled` und `mqtt_topic_prefix` waren nie implementiert (Sensoren laufen ausschließlich über die HA-REST-API). Alte Werte in den Optionen werden ignoriert und beim Laden verworfen; `paho-mqtt` ist keine Abhängigkeit mehr.
+
+### 💾 Schreiblast (SD-Karte / eMMC)
+
+Der Poller schreibt `favorites.json`, `watchlist.json` und `charge_session.json` nur noch, wenn sich der Inhalt wirklich ändert (Belegung, Status, Anschlüsse, Warn-Flags des Lade-Wächters). Minütlich wechselnde Werte – die relative Belegungsdauer der Anschlüsse („vor 12 Min.“), der Quell-Zeitstempel `last_updated` und der Countdown `remaining_minutes` – hält das Add-on nur im Speicher; die API liefert sie trotzdem aktuell aus. Nach einem Neustart sind sie nach dem ersten Abruf wieder frisch.
 
 ---
 
