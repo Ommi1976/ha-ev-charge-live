@@ -1,0 +1,7 @@
+# Shell-Skripte immer mit LF auschecken (core.autocrlf=true würde sonst CRLF erzeugen,
+# woran bash in Git Bash und im Add-on-Container scheitert).
+*.sh text eol=lf
+
+# Von "npx cap sync" bei jedem Build mit LF neu geschrieben – so bleiben sie im git status sauber.
+android/capacitor.settings.gradle text eol=lf
+android/app/capacitor.build.gradle text eol=lf

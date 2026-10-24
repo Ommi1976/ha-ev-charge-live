@@ -4,7 +4,11 @@
   "description": "Ein modernes, leichtgewichtiges Home Assistant OS Add-on zur **Echtzeit-Überwachung von E-Auto-Ladestationen** mit interaktiver Ingress-Karte, 1-Klick-Favoriten und Push-Benachrichtigungen aufs Smartphone, sobald ein Ladeplatz frei wird.",
   "main": "index.js",
   "scripts": {
-    "test": "python -m unittest discover -s tests && node --test tests/test_frontend.js"
+    "test": "python -m unittest discover -s tests && node --test tests/test_frontend.js",
+    "build:www": "node scripts/build-www.js",
+    "check:versions": "node scripts/build-www.js --check",
+    "bump": "node scripts/bump-version.js",
+    "apk": "node scripts/build-apk.js"
   },
   "keywords": [],
   "author": "",
