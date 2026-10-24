@@ -69,6 +69,34 @@ Speziell vorkonfiguriert für alle Ladestationen der **Stadtwerke Hockenheim** s
 
 ---
 
+## 📱 Android-APK unterwegs mit Home Assistant verbinden
+
+Das Add-on ist nur per Ingress erreichbar (kein offener Port). Die APK spricht deshalb ausschließlich mit der **offiziellen Home-Assistant-REST-API**:
+
+| Richtung | Aufruf | Zweck |
+|---|---|---|
+| Add-on → APK | `GET /api/states/sensor.ev_charge_live_bridge` | Favoriten, Beobachtungsliste und Lade-Wächter inkl. Live-Belegung (vom Add-on alle Poll-Zyklen aktualisiert) |
+| APK → Add-on | `POST /api/events/ev_charge_live_command` | Watchlist/Favoriten ändern, Lade-Wächter starten/stoppen, Sync, Test-Push |
+
+Das Add-on abonniert das Event über die Supervisor-WebSocket-API und bestätigt jeden Befehl (`request_id`) im Attribut `recent_commands` des Bridge-Sensors – so zeigt die APK an, ob eine Änderung wirklich im Add-on angekommen ist.
+
+**Einrichtung:** In der Add-on-Oberfläche unter *Einstellungen → 1-Klick Smartphone-Kopplung* den QR-Code mit der APK scannen (oder URL + Token in der APK eintragen und *Verbindung testen*).
+* Für unterwegs die **externe URL** eintragen (z. B. Nabu Casa `https://….ui.nabu.casa`), nicht `homeassistant.local`.
+* Der Long-Lived-Token muss zu einem **Admin-Benutzer** gehören (HA erlaubt Events über die REST-API nur Admins).
+* Optional: `sensor.ev_charge_live_bridge` im Recorder ausschließen, wenn du keinen Verlauf davon brauchst.
+
+Befehle lassen sich auch aus eigenen Automationen senden:
+```yaml
+action:
+  - event: ev_charge_live_command
+    event_data:
+      action: watchlist_add          # watchlist_remove, favorite_add, favorite_remove, session_stop, sync, test_notify
+      station:
+        id: "DE*SWH*E1001"
+```
+
+---
+
 ## 💡 Home Assistant Automations-Beispiele
 
 ### 1. Benachrichtigung über Event-Trigger

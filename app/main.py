@@ -15,9 +15,10 @@ from fastapi.responses import HTMLResponse, PlainTextResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from .client import ev_client
+from .ha_events import event_listener, refresh_session_and_bridge, request_station_sync
 from .notifier import notifier
 from .poller import poller
-from .storage import sanitize_charge_session, storage
+from .storage import prepare_charge_session, storage
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 _LOGGER = logging.getLogger("ev_charge_live.main")
@@ -51,8 +52,11 @@ def _on_background_done(task: "asyncio.Task") -> None:
 async def lifespan(app: FastAPI):
     _LOGGER.info("Starting up EV Charge Live application...")
     poller.start()
+    # APK commands arrive via the HA event bus (outbound WebSocket), not via an exposed port
+    event_listener.start()
     yield
     _LOGGER.info("Shutting down EV Charge Live application...")
+    await event_listener.stop()
     await poller.stop()
 
 
@@ -360,8 +364,8 @@ async def toggle_favorite(station: Dict[str, Any]) -> Dict[str, Any]:
     """Toggles favorite status for a station and triggers immediate HA state push."""
     try:
         is_fav = storage.toggle_favorite(station)
-        # Run poller sync in background to update HA entity immediately
-        _spawn_background(poller.sync_favorites())
+        # Sync in background to update the HA entities (incl. APK bridge sensor) immediately
+        request_station_sync()
         return {"status": "success", "is_favorite": is_fav}
     except ValueError as verr:
         raise HTTPException(status_code=400, detail=str(verr))
@@ -381,6 +385,7 @@ async def toggle_watchlist(station: Dict[str, Any]) -> Dict[str, Any]:
     """Toggles watchlist status for a station."""
     try:
         is_watched = storage.toggle_watchlist(station)
+        request_station_sync()
         return {"status": "success", "is_watched": is_watched}
     except ValueError as verr:
         raise HTTPException(status_code=400, detail=str(verr))
@@ -442,6 +447,7 @@ async def test_notification() -> Dict[str, Any]:
 async def trigger_sync() -> Dict[str, Any]:
     """Manually forces a live polling cycle for all favorites."""
     await poller.sync_favorites()
+    await poller.publish_bridge_state()
     return {"status": "success", "count": len(storage.load_favorites())}
 
 
@@ -457,16 +463,12 @@ async def start_charge_session(session_data: Dict[str, Any]) -> Dict[str, Any]:
     """Starts or updates the active charging session with blocking fee and target SoC monitoring."""
     try:
         now_ms = int(datetime.datetime.now().timestamp() * 1000)
-        clean = sanitize_charge_session(session_data)
-        if not clean.get("station_id") and not clean.get("station_name"):
-            raise HTTPException(status_code=400, detail="station_id or station_name required")
-        # Missing/invalid start time would push the deadline forward on every poll -> never alert
-        clean.setdefault("start_time_ms", now_ms)
-        storage.save_charge_session(clean)
-        _spawn_background(poller.check_charge_session())
+        clean = prepare_charge_session(session_data, now_ms)
+        storage.start_charge_session(clean)
+        _spawn_background(refresh_session_and_bridge())
         return {"status": "success", "session": clean}
-    except HTTPException:
-        raise
+    except ValueError as verr:
+        raise HTTPException(status_code=400, detail=str(verr))
     except Exception as err:
         _LOGGER.error("Failed to start charge session: %s", err, exc_info=True)
         raise HTTPException(status_code=500, detail="Internal error")
@@ -477,7 +479,7 @@ async def stop_charge_session() -> Dict[str, Any]:
     """Stops and clears the active charging session."""
     try:
         storage.clear_charge_session()
-        _spawn_background(poller.check_charge_session())
+        _spawn_background(refresh_session_and_bridge())
         return {"status": "success"}
     except Exception as err:
         _LOGGER.error("Failed to stop charge session: %s", err, exc_info=True)

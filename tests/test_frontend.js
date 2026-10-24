@@ -36,27 +36,59 @@ function decodePlugStatus(hexVal) {
     return { isConnected, isLocked, isCharging, label };
 }
 
-// Deadline-Logik wird direkt aus app/static/app.js geladen (keine Kopie), damit der Test den echten Code prüft
-const { calculateClientBlockingDeadline, isNightHour } = (() => {
-    const fs = require("node:fs");
-    const path = require("node:path");
-    const vm = require("node:vm");
-    const src = fs.readFileSync(path.join(__dirname, "..", "app", "static", "app.js"), "utf8");
-    const pick = (name) => {
-        const startIdx = src.indexOf(`function ${name}(`);
-        assert.ok(startIdx >= 0, `${name} nicht in app.js gefunden`);
-        let depth = 0;
-        for (let i = src.indexOf("{", src.indexOf(")", startIdx)); i < src.length; i++) {
-            if (src[i] === "{") depth++;
-            else if (src[i] === "}" && --depth === 0) return src.slice(startIdx, i + 1);
-        }
-        throw new Error(`${name}: Funktionsende nicht gefunden`);
-    };
-    const code = ["isNightHour", "nextAtHour", "calculateClientBlockingDeadline"].map(pick).join("\n");
-    const ctx = {};
-    vm.runInNewContext(`${code}\nthis.calculateClientBlockingDeadline = calculateClientBlockingDeadline; this.isNightHour = isNightHour;`, ctx);
+// Getestete Logik wird direkt aus app/static/app.js geladen (keine Kopie), damit der Test den echten Code prüft
+const fs = require("node:fs");
+const path = require("node:path");
+const vm = require("node:vm");
+const APP_JS = fs.readFileSync(path.join(__dirname, "..", "app", "static", "app.js"), "utf8");
+const CONTRACT = JSON.parse(fs.readFileSync(path.join(__dirname, "fixtures", "bridge_contract.json"), "utf8"));
+
+function pickFunction(name) {
+    const startIdx = APP_JS.indexOf(`function ${name}(`);
+    assert.ok(startIdx >= 0, `${name} nicht in app.js gefunden`);
+    // Skip the parameter list (may contain default objects like "= {}") before the body starts
+    let parens = 0;
+    let i = APP_JS.indexOf("(", startIdx);
+    for (; i < APP_JS.length; i++) {
+        if (APP_JS[i] === "(") parens++;
+        else if (APP_JS[i] === ")" && --parens === 0) break;
+    }
+    let depth = 0;
+    for (i = APP_JS.indexOf("{", i); i < APP_JS.length; i++) {
+        if (APP_JS[i] === "{") depth++;
+        else if (APP_JS[i] === "}" && --depth === 0) return APP_JS.slice(startIdx, i + 1);
+    }
+    throw new Error(`${name}: Funktionsende nicht gefunden`);
+}
+
+function pickConst(name) {
+    const match = APP_JS.match(new RegExp(`^const ${name} = .*;$`, "m"));
+    assert.ok(match, `Konstante ${name} nicht in app.js gefunden`);
+    return match[0];
+}
+
+function loadFromAppJs({ consts = [], functions = [], globals = {} }) {
+    const code = [...consts.map(pickConst), ...functions.map(pickFunction)].join("\n");
+    const ctx = { ...globals };
+    vm.runInNewContext(`${code}\n${functions.map(n => `this.${n} = ${n};`).join("\n")}`, ctx);
     return ctx;
-})();
+}
+
+// Objects from the vm realm have foreign prototypes; compare plain JSON
+const plain = (value) => JSON.parse(JSON.stringify(value));
+
+const { calculateClientBlockingDeadline, isNightHour } = loadFromAppJs({
+    functions: ["isNightHour", "nextAtHour", "calculateClientBlockingDeadline"]
+});
+
+const haBridge = loadFromAppJs({
+    consts: ["HA_BRIDGE_ENTITY", "HA_BRIDGE_PROTOCOL", "HA_BRIDGE_STALE_MS", "HA_VIA_SUFFIX", "HA_STATION_KEYS", "HA_LIVE_KEYS"],
+    functions: [
+        "normalizeHaBaseUrl", "describeHaHttpError", "formatSinceDuration", "parseHaBridgeState",
+        "mergeHaBridgeStations", "reconcileChargeSession", "compactStationForHa", "buildHaCommand", "findHaCommandAck"
+    ],
+    globals: { URL }
+});
 
 function parsePairingPayload(rawText) {
     const clean = String(rawText || "").trim();
@@ -220,4 +252,150 @@ test("Home Assistant 1-Klick Pairing: Payload-Erkennung", () => {
     const evseQr = "https://ladeapp.de/de/station/DE*SWH*E000123";
     const parsedEvse = parsePairingPayload(evseQr);
     assert.equal(parsedEvse.isPairing, false);
+});
+
+/* ==========================================================================
+   APK unterwegs: Verbindung zum Add-on über die HA-REST-API (Bridge-Sensor + Events)
+   ========================================================================== */
+
+test("APK → HA: kein Aufruf des nicht existierenden hassio_ingress-Pfads mehr", () => {
+    assert.equal(APP_JS.includes("hassio_ingress"), false);
+    assert.ok(APP_JS.includes("/api/states/${HA_BRIDGE_ENTITY}"));
+    assert.ok(APP_JS.includes("/api/events/${HA_COMMAND_EVENT}"));
+});
+
+test("APK → HA: Server-URL wird auf den Origin normalisiert", () => {
+    const { normalizeHaBaseUrl } = haBridge;
+    assert.equal(normalizeHaBaseUrl("http://homeassistant.local:8123/"), "http://homeassistant.local:8123");
+    assert.equal(normalizeHaBaseUrl(" https://abc123.ui.nabu.casa/lovelace/0 "), "https://abc123.ui.nabu.casa");
+    assert.equal(normalizeHaBaseUrl("https://user:pw@ha.example.org"), "https://ha.example.org");
+    assert.equal(normalizeHaBaseUrl("homeassistant.local:8123"), "");
+    assert.equal(normalizeHaBaseUrl("javascript:alert(1)"), "");
+    assert.equal(normalizeHaBaseUrl(""), "");
+    assert.equal(normalizeHaBaseUrl(null), "");
+});
+
+test("APK → HA: Watchlist-Befehl entspricht dem Vertrag des Add-ons", () => {
+    const { buildHaCommand } = haBridge;
+    // Same fixture is executed by the add-on in tests/test_bridge.py
+    const cmd = buildHaCommand("watchlist_add", { station: CONTRACT.apk_station }, "apk_test_1");
+    assert.deepEqual(plain(cmd), CONTRACT.apk_command);
+
+    const session = { station_id: "s1", start_time_ms: 1792850400000 };
+    const sessionCmd = plain(buildHaCommand("session_start", { session }, "apk_x"));
+    assert.deepEqual(sessionCmd, { protocol: 1, action: "session_start", request_id: "apk_x", session });
+    assert.deepEqual(plain(buildHaCommand("sync", {}, "apk_y")), { protocol: 1, action: "sync", request_id: "apk_y" });
+});
+
+test("APK → HA: Bridge-Sensor des Add-ons wird gelesen (Favoriten, Watchlist, Lade-Wächter, Quittung)", () => {
+    const { parseHaBridgeState, findHaCommandAck } = haBridge;
+    const state = CONTRACT.bridge_state;
+    const nowMs = 1792854000000 + 65 * 60000;
+    const snap = parseHaBridgeState(state, nowMs);
+
+    assert.deepEqual(plain(snap.favorites.map(s => s.id)), ["DE*SWH*E1001"]);
+    assert.deepEqual(plain(snap.watchlist.map(s => s.id)), ["DE*SWH*E1001", "DE*EBW*E2002"]);
+    const pumpwerk = snap.favorites[0];
+    assert.equal(pumpwerk.free_slots, 1);
+    assert.equal(pumpwerk.live_source, "EnBW Echtzeit");
+    // "vor X Min." is derived locally from updated_at (not stored in HA to avoid recorder churn)
+    assert.equal(pumpwerk.connectors[1].duration_str, "vor 1 Std. 5 Min.");
+    assert.equal(pumpwerk.connectors[0].duration_str, "vor 5 Min.");
+    assert.equal(snap.session.deadline_ms, 1792864800000);
+    assert.equal(snap.session.station_name, "Hockenheim Pumpwerk");
+    assert.equal(snap.reportedAt, Date.parse(state.last_reported));
+    assert.equal(snap.truncated, false);
+
+    const ack = findHaCommandAck(snap, "apk_test_1");
+    assert.equal(ack.ok, true);
+    assert.equal(findHaCommandAck(snap, "apk_unknown"), null);
+});
+
+test("APK → HA: ungültige oder fremde Sensor-Daten werden verworfen", () => {
+    const { parseHaBridgeState } = haBridge;
+    const state = CONTRACT.bridge_state;
+    assert.equal(parseHaBridgeState(null), null);
+    assert.equal(parseHaBridgeState({ ...state, entity_id: "sensor.other" }), null);
+    assert.equal(parseHaBridgeState({ ...state, attributes: { ...state.attributes, protocol: 2 } }), null);
+    assert.equal(parseHaBridgeState({ entity_id: state.entity_id }), null);
+
+    const junk = parseHaBridgeState({
+        entity_id: state.entity_id,
+        attributes: {
+            protocol: 1,
+            stations: [null, "x", { name: "ohne id" }, { id: 7, connectors: "kaputt" }],
+            favorite_ids: [7, "fehlt"],
+            watch_ids: "nein",
+            session: "x",
+            recent_commands: [null, { request_id: "a" }]
+        }
+    });
+    assert.deepEqual(plain(junk.favorites), [{ id: "7", connectors: [] }]);
+    assert.deepEqual(plain(junk.watchlist), []);
+    assert.equal(junk.session, null);
+    assert.equal(junk.recentCommands.length, 1);
+    assert.equal(junk.reportedAt, null);
+});
+
+test("APK → HA: Kartendaten zeigen für überwachte Säulen den Add-on-Stand", () => {
+    const { parseHaBridgeState, mergeHaBridgeStations } = haBridge;
+    const reportedAt = Date.parse(CONTRACT.bridge_state.last_reported);
+    const snap = parseHaBridgeState(CONTRACT.bridge_state, reportedAt);
+    const direct = [
+        { ...CONTRACT.apk_station, free_slots: 2, status: "AVAILABLE" },
+        { id: "DE*XYZ*E9", name: "Fremd", free_slots: 3, total_slots: 3, live_source: "MobiData BW" }
+    ];
+
+    const merged = plain(mergeHaBridgeStations(direct, snap, reportedAt + 60000));
+    assert.equal(merged[0].free_slots, 1);
+    assert.equal(merged[0].status, "PARTIAL");
+    assert.equal(merged[0].is_favorite, true);
+    assert.equal(merged[0].is_watched, true);
+    assert.equal(merged[0].live_source, "EnBW Echtzeit · via Home Assistant");
+    assert.equal(merged[1].free_slots, 3);
+    assert.equal(merged[1].is_favorite, false);
+    assert.equal(merged[1].live_source, "MobiData BW");
+
+    // Suffix is not stacked when merged data is merged again
+    const relabeled = { ...snap, favorites: [{ ...snap.favorites[0], live_source: merged[0].live_source }] };
+    assert.equal(plain(mergeHaBridgeStations(merged, relabeled, reportedAt))[0].live_source, "EnBW Echtzeit · via Home Assistant");
+
+    // Stale add-on data (> 5 min without report) does not override the fresher direct search
+    const stale = plain(mergeHaBridgeStations(direct, snap, reportedAt + 10 * 60000));
+    assert.equal(stale[0].free_slots, 2);
+    assert.equal(stale[0].is_watched, true);
+
+    // Direct search empty (offline MobiData): monitored stations stay visible
+    const fallback = plain(mergeHaBridgeStations([], snap, reportedAt));
+    assert.deepEqual(fallback.map(s => s.id).sort(), ["DE*EBW*E2002", "DE*SWH*E1001"]);
+    assert.deepEqual(plain(mergeHaBridgeStations(direct, null)), plain(direct));
+});
+
+test("APK → HA: Lade-Wächter-Abgleich mit dem Add-on", () => {
+    const { reconcileChargeSession } = haBridge;
+    const remote = { station_id: "s1", start_time_ms: 1, deadline_ms: 2 };
+    assert.deepEqual(plain(reconcileChargeSession(null, remote)), { ...remote, ha_synced: true });
+    // Stopped in HA/Ingress: confirmed local session is removed
+    assert.equal(reconcileChargeSession({ ...remote, ha_synced: true }, null), null);
+    // Not yet confirmed by the add-on (offline start): local session stays and gets re-sent
+    const pending = { station_id: "s2", start_time_ms: 3 };
+    assert.equal(reconcileChargeSession(pending, remote), pending);
+    assert.equal(reconcileChargeSession(pending, null), pending);
+    assert.equal(reconcileChargeSession(null, null), null);
+});
+
+test("APK → HA: Zeitangaben und Fehlermeldungen", () => {
+    const { formatSinceDuration, describeHaHttpError } = haBridge;
+    const now = Date.UTC(2026, 9, 23, 18, 0, 0);
+    assert.equal(formatSinceDuration(now - 12 * 60000, now), "vor 12 Min.");
+    assert.equal(formatSinceDuration(String(now - 125 * 60000), now), "vor 2 Std. 5 Min.");
+    assert.equal(formatSinceDuration(new Date(now - 60000).toISOString(), now), "vor 1 Min.");
+    assert.equal(formatSinceDuration(now + 60000, now), "vor 0 Min.");
+    assert.equal(formatSinceDuration(null, now), null);
+    assert.equal(formatSinceDuration("kaputt", now), null);
+
+    assert.match(describeHaHttpError(401), /Token/);
+    assert.match(describeHaHttpError(404), /Add-on-Sensor/);
+    assert.match(describeHaHttpError(0), /nicht erreichbar/);
+    assert.match(describeHaHttpError(500), /HTTP 500/);
 });
