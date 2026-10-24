@@ -10,6 +10,8 @@ permissions:
 jobs:
   test:
     runs-on: ubuntu-latest
+    env:
+      DATA_DIR: /tmp/ev-charge-live-data
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4

@@ -3,6 +3,7 @@ import logging
 import math
 import os
 import re
+import tempfile
 import threading
 from typing import Any, Dict, List, Optional
 
@@ -298,7 +299,22 @@ DEFAULT_OPTIONS: Dict[str, Any] = {
     }
 }
 
-DATA_DIR = os.getenv("DATA_DIR", "/data")
+def _resolve_data_dir() -> str:
+    env_dir = os.getenv("DATA_DIR")
+    if env_dir:
+        return env_dir
+    # In Home Assistant Add-ons, /data exists and is writable.
+    # On non-root Linux / local dev environments, fall back to temporary directory.
+    if os.path.exists("/data"):
+        try:
+            if os.access("/data", os.W_OK):
+                return "/data"
+        except OSError:
+            pass
+    return os.path.join(tempfile.gettempdir(), "ev-charge-live-data")
+
+
+DATA_DIR = _resolve_data_dir()
 OPTIONS_FILE = os.path.join(DATA_DIR, "options.json")
 CONFIG_OVERRIDE_FILE = os.path.join(DATA_DIR, "config_override.json")
 FAVORITES_FILE = os.path.join(DATA_DIR, "favorites.json")
@@ -313,7 +329,10 @@ class StorageManager:
         self._live_stations: Dict[str, Dict[str, Any]] = {}
         # (session key, volatile fields) of the stored charge session, kept in memory only
         self._session_volatile: Optional[tuple] = None
-        os.makedirs(DATA_DIR, exist_ok=True)
+        try:
+            os.makedirs(DATA_DIR, exist_ok=True)
+        except (PermissionError, OSError) as err:
+            _LOGGER.warning("Could not create DATA_DIR %s (%s), continuing with memory fallback", DATA_DIR, err)
 
     def load_config(self) -> Dict[str, Any]:
         """Loads configuration merging defaults, options.json from HA and user overrides."""
