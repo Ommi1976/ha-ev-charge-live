@@ -1627,7 +1627,7 @@ function buildStationDetailBodyHtml(st) {
         <div class="blocking-fee-box">
             <div class="fee-header">
                 <span>⏱️ Stand- &amp; Blockiergebühr (${escapeHtml(feeInfo.title)})</span>
-                <span class="badge-fee">${feeInfo.freeMinutes} Min. frei</span>
+                <span class="badge-fee">${feeInfo.freeMinutes} Min. frei${feeInfo.maxFeeCap ? ` &bull; max. ${feeInfo.maxFeeCap.toFixed(2).replace('.', ',')} € Deckel` : ''}</span>
             </div>
             <div class="fee-text">${escapeHtml(feeInfo.summary)}</div>
             <div class="fee-night">${escapeHtml(feeInfo.nightRule)}</div>
@@ -1761,10 +1761,11 @@ function getBlockingFeeInfo(operator, hasDc) {
             title: "Stadtwerke Hockenheim",
             freeMinutes: 240,
             feePerMinute: 0.10,
+            maxFeeCap: 12.00,
             nightStart: 20,
             nightEnd: 8,
             hasNightRule: true,
-            summary: "Ab 240 Min. (4 Std.) 0,10 €/Min. Tagsüber Parkscheibe (3–4 Std.) beachten.",
+            summary: "Ab 240 Min. (4 Std.) 0,10 €/Min. (Gedeckelt auf max. 12,00 € pro Vorgang). Tagsüber Parkscheibe (3–4 Std.) beachten.",
             nightRule: "🌙 Nachts (20:00 – 08:00 Uhr) ohne Blockiergebühr.",
             timerMinutes: 240
         };
@@ -1776,6 +1777,7 @@ function getBlockingFeeInfo(operator, hasDc) {
                 title: "EnBW mobility+ (DC)",
                 freeMinutes: 45,
                 feePerMinute: 0.10,
+                maxFeeCap: 12.00,
                 nightStart: 21,
                 nightEnd: 9,
                 hasNightRule: false,
@@ -1788,10 +1790,11 @@ function getBlockingFeeInfo(operator, hasDc) {
                 title: "EnBW mobility+ (AC)",
                 freeMinutes: 240,
                 feePerMinute: 0.10,
+                maxFeeCap: 12.00,
                 nightStart: 21,
                 nightEnd: 9,
                 hasNightRule: true,
-                summary: "Ab 240 Min. (4 Std.) Standzeit 0,10 €/Min. (Gedeckelt auf max. 12,00 €).",
+                summary: "Ab 240 Min. (4 Std.) Standzeit 0,10 €/Min. (Gedeckelt auf max. 12,00 € pro Vorgang).",
                 nightRule: "🌙 Nachts (21:00 – 09:00 Uhr) ohne Blockiergebühr.",
                 timerMinutes: 240
             };
@@ -1803,10 +1806,11 @@ function getBlockingFeeInfo(operator, hasDc) {
             title: "IONITY High Power",
             freeMinutes: 60,
             feePerMinute: 0.20,
+            maxFeeCap: null,
             nightStart: 21,
             nightEnd: 9,
             hasNightRule: false,
-            summary: "Ab 60 Min. Standzeit 0,20 €/Min. Blockiergebühr.",
+            summary: "Ab 60 Min. Standzeit 0,20 €/Min. Blockiergebühr (ohne Deckel).",
             nightRule: "⚠️ Rund um die Uhr aktiv.",
             timerMinutes: 60
         };
@@ -1817,6 +1821,7 @@ function getBlockingFeeInfo(operator, hasDc) {
             title: "Aral pulse (DC)",
             freeMinutes: 45,
             feePerMinute: 0.10,
+            maxFeeCap: 12.00,
             nightStart: 21,
             nightEnd: 9,
             hasNightRule: false,
@@ -1831,6 +1836,7 @@ function getBlockingFeeInfo(operator, hasDc) {
             title: "Tesla Supercharger",
             freeMinutes: 0,
             feePerMinute: 0.50,
+            maxFeeCap: null,
             nightStart: 21,
             nightEnd: 9,
             hasNightRule: false,
@@ -1845,10 +1851,11 @@ function getBlockingFeeInfo(operator, hasDc) {
             title: "Shell Recharge",
             freeMinutes: hasDc ? 45 : 240,
             feePerMinute: 0.10,
+            maxFeeCap: 12.00,
             nightStart: 21,
             nightEnd: 9,
             hasNightRule: !hasDc,
-            summary: hasDc ? "DC Schnelllader: Standgebühr ab 45 Min. (0,10 €/Min.)." : "AC: Standgebühr ab 240 Min. (4 Std.) 0,10 €/Min.",
+            summary: hasDc ? "DC Schnelllader: Standgebühr ab 45 Min. (0,10 €/Min., max. 12,00 € Deckel)." : "AC: Standgebühr ab 240 Min. (4 Std.) 0,10 €/Min. (max. 12,00 € Deckel).",
             nightRule: "🌙 Bei AC nachts (21:00–09:00 Uhr) oft frei.",
             timerMinutes: hasDc ? 45 : 240
         };
@@ -1859,6 +1866,7 @@ function getBlockingFeeInfo(operator, hasDc) {
             title: "ALDI SÜD Filial-Ladepunkt",
             freeMinutes: 60,
             feePerMinute: 0.10,
+            maxFeeCap: null,
             nightStart: 21,
             nightEnd: 9,
             hasNightRule: false,
@@ -1873,10 +1881,11 @@ function getBlockingFeeInfo(operator, hasDc) {
             title: "Wirelane",
             freeMinutes: 240,
             feePerMinute: 0.10,
+            maxFeeCap: 12.00,
             nightStart: 22,
             nightEnd: 8,
             hasNightRule: true,
-            summary: "AC: Ab 240 Min. (4 Std.) Standzeitzuschlag von 0,10 €/Min.",
+            summary: "AC: Ab 240 Min. (4 Std.) Standzeitzuschlag von 0,10 €/Min. (max. 12,00 € Deckel).",
             nightRule: "🌙 Nachts (22:00–08:00 Uhr) gebührenfrei.",
             timerMinutes: 240
         };
@@ -1888,10 +1897,11 @@ function getBlockingFeeInfo(operator, hasDc) {
             title: "DC Schnelllader",
             freeMinutes: 45,
             feePerMinute: 0.10,
+            maxFeeCap: 12.00,
             nightStart: 21,
             nightEnd: 9,
             hasNightRule: false,
-            summary: "DC Schnelllader: Standgebühr meist ab 45–60 Min. (ca. 0,10–0,15 €/Min.).",
+            summary: "DC Schnelllader: Standgebühr meist ab 45–60 Min. (ca. 0,10–0,15 €/Min., max. 12,00 € Deckel).",
             nightRule: "Je nach Ladekarte / Roaming-Tarif.",
             timerMinutes: 45
         };
@@ -1900,10 +1910,11 @@ function getBlockingFeeInfo(operator, hasDc) {
             title: "AC Normallader",
             freeMinutes: 240,
             feePerMinute: 0.10,
+            maxFeeCap: 12.00,
             nightStart: 21,
             nightEnd: 9,
             hasNightRule: true,
-            summary: "AC Normallader: Standgebühr meist ab 240 Min. (4 Std.) ca. 0,10 €/Min.",
+            summary: "AC Normallader: Standgebühr meist ab 240 Min. (4 Std.) ca. 0,10 €/Min. (max. 12,00 € Deckel).",
             nightRule: "🌙 Viele Roaming-Tarife nachts (21:00 – 08:00 Uhr) gebührenfrei.",
             timerMinutes: 240
         };
@@ -2405,6 +2416,15 @@ function renderFavoritesModal() {
 
         const safeJsId = escapeJsString(f.id);
         const watched = isWatched(f.id);
+        const hasDc = (f.connectors || []).some(c => (c.type || c.standard || "").toLowerCase().includes("ccs") || (Number(c.power_kw) > 22));
+        const fee = getBlockingFeeInfo(f.operator, hasDc);
+        const capNotice = fee.maxFeeCap ? ` (max. ${fee.maxFeeCap.toFixed(2).replace('.', ',')} € Deckel)` : '';
+        const feeBadgeHtml = `
+            <div style="font-size: 0.71rem; color: #94a3b8; margin-top: 3px; display: flex; align-items: center; gap: 4px;">
+                <span>⏱️ ${fee.freeMinutes} Min. frei &bull; ${fee.feePerMinute.toFixed(2).replace('.', ',')} €/Min.${capNotice}</span>
+                <span>${fee.hasNightRule ? '🌙' : '⚠️'}</span>
+            </div>
+        `;
         const connLineHtml = (f.connectors && f.connectors.length > 0) ? `
             <div style="font-size: 0.72rem; margin-top: 4px; display: flex; gap: 8px; flex-wrap: wrap;">
                 ${f.connectors.map((c, i) => {
@@ -2423,6 +2443,7 @@ function renderFavoritesModal() {
                     <h4>${escapeHtml(f.name)}</h4>
                     <div class="sub">${escapeHtml(f.operator)} &bull; ${escapeHtml(f.address)}</div>
                     ${connLineHtml}
+                    ${feeBadgeHtml}
                 </div>
                 <div class="favorite-actions">
                     <span class="badge ${statusBadge}">${Number(f.free_slots || 0)} / ${Number(f.total_slots || 0)} frei</span>
@@ -3688,12 +3709,29 @@ async function connectVlinkerBle(silent = false, isAutoRetry = false) {
         await new Promise(r => setTimeout(r, 200));
         await sendBleCommand("ATH0");
         await new Promise(r => setTimeout(r, 200));
+        await sendBleCommand("ATCAF1"); // ISO-TP Automatic Formatting / Flow Control AN
+        await new Promise(r => setTimeout(r, 200));
+        await sendBleCommand("ATST 32"); // Timeout auf 200ms (50 * 4ms) für MEB-Gateway Routing
+        await new Promise(r => setTimeout(r, 200));
         await sendBleCommand("ATRV"); // 12V Spannung direkt vom Dongle-ADC
         await new Promise(r => setTimeout(r, 250));
         await sendBleCommand("ATSP6"); // ISO 15765-4 CAN 11bit 500k
         await new Promise(r => setTimeout(r, 250));
         await sendBleCommand("ATSH 7E5"); // Header auf MEB BMS 7E5
         await new Promise(r => setTimeout(r, 250));
+        await sendBleCommand("ATCRA 7ED"); // CAN Receive Address Filter auf 7ED festzurren
+        await new Promise(r => setTimeout(r, 250));
+        await sendBleCommand("ATFCSH 7E5"); // Flow Control Header 7E5
+        await new Promise(r => setTimeout(r, 200));
+        await sendBleCommand("ATFCSD 30 00 00"); // Flow Control CTS, Block 0, STmin 0
+        await new Promise(r => setTimeout(r, 200));
+        await sendBleCommand("ATFCSM 1"); // Flow Control Mode 1
+        await new Promise(r => setTimeout(r, 200));
+
+        // MEB UDS Extended Diagnostic Session (10 03) anfordern
+        obdLog("info", "Starte UDS Extended Diagnostic Session (10 03) auf MEB BMS...");
+        await sendBleCommand("10 03");
+        await new Promise(r => setTimeout(r, 350));
 
         // Erste Abfrage starten + zyklisches Polling alle 8 Sekunden
         await queryBornTelemetry();
@@ -3773,6 +3811,26 @@ function parseBleResponse(response) {
 
     const cleaned = response.replace(/\s+/g, "").toUpperCase();
 
+    // MEB BMS UDS Extended Diagnostic Session Positiv-Antwort (10 03 -> 50 03 ...)
+    if (cleaned.includes("5003")) {
+        obdLog("success", "✅ MEB BMS UDS Extended Diagnostic Session aktiv (50 03)!");
+    }
+
+    // MEB BMS UDS NRC (Negative Response Code z.B. 7F 22 7E / 7F 22 22)
+    if (cleaned.includes("7F22")) {
+        obdLog("warn", "⚠️ MEB BMS Service 22 abgelehnt (NRC 7F 22) -> Fordere UDS Extended Session (10 03) erneut an...");
+        setTimeout(() => { if (bleConnection.connected && !bleConnection.commandLock) sendBleCommand("10 03"); }, 400);
+    }
+
+    // Hinweis bei 'NO DATA'
+    if (cleaned.includes("NODATA")) {
+        const now = Date.now();
+        if (!window._lastNoDataLog || now - window._lastNoDataLog > 20000) {
+            window._lastNoDataLog = now;
+            obdLog("warn", "⚠️ Dongle meldet 'NO DATA' auf UDS-Abfrage: Bitte prüfen, ob die Zündung (Ready/Startknopf) im Cupra Born AN ist oder das Ladekabel aktiv lädt (im Stand schaltet das Gateway den BMS-Bus nach ~30s ab).");
+        }
+    }
+
     // Display SoC (PID 02 8C -> Positiv-Antwort 62 02 8C [BYTE])
     if (cleaned.includes("62028C")) {
         const idx = cleaned.lastIndexOf("62028C") + 6;
@@ -3786,6 +3844,25 @@ function parseBleResponse(response) {
                 const el = document.getElementById("obd-val-soc");
                 if (el) el.textContent = `${soc} %`;
                 obdLog("success", `📊 Display-SoC (PID 028C): ${soc} % (raw=0x${hexVal})`);
+                updateCupraUi();
+                renderMapMarkers(activeStations, false);
+            }
+        }
+    }
+
+    // Alternative Display SoC (PID F4 5B -> 62 F4 5B [BYTE] bei manchen MEB 3.x+ Softwareständen)
+    if (cleaned.includes("62F45B")) {
+        const idx = cleaned.lastIndexOf("62F45B") + 6;
+        const hexVal = cleaned.substring(idx, idx + 2);
+        if (hexVal && hexVal.length === 2) {
+            const raw = parseInt(hexVal, 16);
+            if (!isNaN(raw)) {
+                const soc = Math.min(100, Math.max(0, raw <= 100 ? raw : Math.round(raw / 2.55)));
+                cupraState.liveSoc = soc;
+                cupraState.source = "ble";
+                const el = document.getElementById("obd-val-soc");
+                if (el) el.textContent = `${soc} %`;
+                obdLog("success", `📊 Display-SoC (PID F45B): ${soc} % (raw=0x${hexVal})`);
                 updateCupraUi();
                 renderMapMarkers(activeStations, false);
             }
@@ -4039,7 +4116,9 @@ async function queryBornTelemetry() {
     bleConnection.commandLock = true;
     try {
         await sendBleCommand("ATRV");     // 12V Bordnetz direkt via ELM/vLinker
-        await new Promise(r => setTimeout(r, 220));
+        await new Promise(r => setTimeout(r, 200));
+        await sendBleCommand("3E 00");    // UDS Tester Present (Hält MEB Diagnostic Session 10 03 aktiv)
+        await new Promise(r => setTimeout(r, 200));
         await sendBleCommand("22 02 8C"); // Display SoC
         await new Promise(r => setTimeout(r, 220));
         await sendBleCommand("22 02 8D"); // BMS SoC
@@ -4051,6 +4130,10 @@ async function queryBornTelemetry() {
         await sendBleCommand("22 02 8A"); // Battery State of Health (SoH)
         await new Promise(r => setTimeout(r, 220));
         await sendBleCommand("22 02 8F"); // Ladekabel / Stecker Status
+        await new Promise(r => setTimeout(r, 220));
+        if (cupraState.liveSoc === null) {
+            await sendBleCommand("22 F4 5B"); // Alternative Display SoC (MEB 3.x+)
+        }
     } finally {
         bleConnection.commandLock = false;
     }

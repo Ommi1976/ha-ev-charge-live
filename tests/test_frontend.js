@@ -77,8 +77,8 @@ function loadFromAppJs({ consts = [], functions = [], globals = {} }) {
 // Objects from the vm realm have foreign prototypes; compare plain JSON
 const plain = (value) => JSON.parse(JSON.stringify(value));
 
-const { calculateClientBlockingDeadline, isNightHour } = loadFromAppJs({
-    functions: ["isNightHour", "nextAtHour", "calculateClientBlockingDeadline"]
+const { calculateClientBlockingDeadline, isNightHour, getBlockingFeeInfo } = loadFromAppJs({
+    functions: ["isNightHour", "nextAtHour", "calculateClientBlockingDeadline", "getBlockingFeeInfo"]
 });
 
 const haBridge = loadFromAppJs({
@@ -144,6 +144,51 @@ test("UDS Telemetrie: 12V Bordnetz-Spannung", () => {
     assert.equal(decode12vVolts("7C"), 12.4); // 124 / 10 = 12.4V
     assert.equal(decode12vVolts("82"), 13.0); // 130 / 10 = 13.0V
     assert.equal(decode12vVolts("8F"), 14.3); // 143 / 10 = 14.3V (Lichtmaschine / DC-DC aktiv)
+});
+
+test("UDS Telemetrie: Extended Session (10 03) & Alternative SoC (22 F4 5B)", () => {
+    // 50 03 positive response detection
+    const resp5003 = "50 03 00 32 01 F4\r\r>";
+    const clean5003 = resp5003.replace(/\s+/g, "").toUpperCase();
+    assert.ok(clean5003.includes("5003"));
+
+    // Alternative PID F4 5B decoding (62 F4 5B [BYTE])
+    const respF45B = "62 F4 5B 4B\r\r>"; // 0x4B = 75%
+    const cleanF45B = respF45B.replace(/\s+/g, "").toUpperCase();
+    assert.ok(cleanF45B.includes("62F45B"));
+    const idx = cleanF45B.lastIndexOf("62F45B") + 6;
+    const hexVal = cleanF45B.substring(idx, idx + 2);
+    const soc = decodeDisplaySoc(hexVal);
+    assert.equal(soc, 75);
+
+    // Negative Response Code (NRC 7F 22 7E) detection
+    const respNrc = "7F 22 7E\r\r>";
+    const cleanNrc = respNrc.replace(/\s+/g, "").toUpperCase();
+    assert.ok(cleanNrc.includes("7F22"));
+});
+
+test("Stand- & Blockiergebühr: Stadtwerke Hockenheim und Anbieter mit maxFeeCap", () => {
+    const swh = getBlockingFeeInfo("Stadtwerke Hockenheim", false);
+    assert.equal(swh.title, "Stadtwerke Hockenheim");
+    assert.equal(swh.freeMinutes, 240);
+    assert.equal(swh.feePerMinute, 0.10);
+    assert.equal(swh.maxFeeCap, 12.00);
+    assert.ok(swh.summary.includes("12,00 €"));
+
+    const enbwAc = getBlockingFeeInfo("EnBW mobility+", false);
+    assert.equal(enbwAc.maxFeeCap, 12.00);
+
+    const enbwDc = getBlockingFeeInfo("EnBW mobility+", true);
+    assert.equal(enbwDc.maxFeeCap, 12.00);
+
+    const aral = getBlockingFeeInfo("Aral pulse", true);
+    assert.equal(aral.maxFeeCap, 12.00);
+
+    const ionity = getBlockingFeeInfo("IONITY", true);
+    assert.equal(ionity.maxFeeCap, null);
+
+    const fallbackAc = getBlockingFeeInfo("Unbekannter Betreiber", false);
+    assert.equal(fallbackAc.maxFeeCap, 12.00);
 });
 
 test("UDS Telemetrie: Ladekabel & Stecker-Bitmaske", () => {
