@@ -57,8 +57,9 @@ const APP_JS = fs.readFileSync(path.join(__dirname, "..", "app", "static", "app.
 const CONTRACT = JSON.parse(fs.readFileSync(path.join(__dirname, "fixtures", "bridge_contract.json"), "utf8"));
 
 function pickFunction(name) {
-    const startIdx = APP_JS.indexOf(`function ${name}(`);
-    assert.ok(startIdx >= 0, `${name} nicht in app.js gefunden`);
+    const fnIdx = APP_JS.indexOf(`function ${name}(`);
+    assert.ok(fnIdx >= 0, `${name} nicht in app.js gefunden`);
+    const startIdx = APP_JS.startsWith("async ", fnIdx - 6) ? fnIdx - 6 : fnIdx;
     // Skip the parameter list (may contain default objects like "= {}") before the body starts
     let parens = 0;
     let i = APP_JS.indexOf("(", startIdx);
@@ -497,4 +498,103 @@ test("APK → HA: Zeitangaben und Fehlermeldungen", () => {
     assert.match(describeHaHttpError(404), /Add-on-Sensor/);
     assert.match(describeHaHttpError(0), /nicht erreichbar/);
     assert.match(describeHaHttpError(500), /HTTP 500/);
+});
+
+// haRequest with a fake fetch (browser path) to check the 401 lock
+function loadHaRequest(responder) {
+    const calls = [];
+    const ctx = loadFromAppJs({
+        consts: ["haAuthState", "isNativeApp"],
+        functions: ["haRequest"],
+        globals: {
+            window: {},
+            AbortController,
+            setTimeout,
+            clearTimeout,
+            getHaRemoteConfig: () => null,
+            fetch: async (url, opts) => {
+                calls.push(`${opts.method} ${url}`);
+                const status = responder(opts.method, url);
+                return { ok: status < 300, status, json: async () => ({}) };
+            }
+        }
+    });
+    return { ctx, calls };
+}
+
+test("APK → HA: Nicht-Admin-Token wird nach abgelehntem Befehl nicht gesperrt", async () => {
+    const ha = { url: "https://ha.example.org", token: "user-token" };
+    // HA: reading allowed, firing events only for admins (401)
+    const { ctx, calls } = loadHaRequest((method) => (method === "POST" ? 401 : 200));
+    assert.equal((await ctx.haRequest("/api/events/x", { method: "POST", body: {}, ha })).status, 401);
+    assert.equal((await ctx.haRequest("/api/states/s", { ha })).status, 200);
+    assert.equal(calls.length, 2);
+});
+
+test("APK → HA: ungültiger Token wird nach abgelehntem Lesen nicht wiederholt (IP-Ban)", async () => {
+    const ha = { url: "https://ha.example.org", token: "bad-token" };
+    const { ctx, calls } = loadHaRequest(() => 401);
+    assert.equal((await ctx.haRequest("/api/states/s", { ha })).status, 401);
+    assert.equal((await ctx.haRequest("/api/states/s", { ha })).status, 401);
+    assert.equal((await ctx.haRequest("/api/events/x", { method: "POST", body: {}, ha })).status, 401);
+    assert.equal(calls.length, 1);
+});
+
+// postHaCommand with a fake haRequest: event for admins, script for everyone else
+function loadPostHaCommand(responder) {
+    const calls = [];
+    const ctx = loadFromAppJs({
+        consts: ["HA_COMMAND_EVENT", "HA_COMMAND_SCRIPT", "haCommandState"],
+        functions: ["postHaCommand", "describeHaCommandError", "describeHaHttpError"],
+        globals: {
+            getHaRemoteConfig: () => null,
+            haRequest: async (path, opts) => {
+                calls.push({ path, body: opts.body, token: opts.ha.token });
+                const status = responder(path);
+                return { ok: status < 300, status, data: null };
+            }
+        }
+    });
+    return { ctx, calls };
+}
+
+test("APK → HA: Admin-Token sendet Befehle direkt als Event", async () => {
+    const { ctx, calls } = loadPostHaCommand(() => 200);
+    const cmd = CONTRACT.apk_command;
+    const res = await ctx.postHaCommand(cmd, { url: "https://ha", token: "admin" });
+    assert.equal(res.ok, true);
+    assert.deepEqual(calls.map(c => c.path), ["/api/events/ev_charge_live_command"]);
+    assert.deepEqual(plain(calls[0].body), cmd);
+});
+
+test("APK → HA: Nicht-Admin-Token sendet Befehle über script.ev_charge_live_command", async () => {
+    const { ctx, calls } = loadPostHaCommand((path) => (path.startsWith("/api/events/") ? 401 : 200));
+    const ha = { url: "https://ha", token: "user" };
+    const cmd = CONTRACT.apk_command;
+    const first = await ctx.postHaCommand(cmd, ha);
+    assert.equal(first.ok, true);
+    assert.equal(first.viaScript, true);
+    assert.deepEqual(calls.map(c => c.path), ["/api/events/ev_charge_live_command", "/api/services/script/ev_charge_live_command"]);
+    // Script data = command (the script re-fires it unchanged, see tests/test_bridge.py)
+    assert.deepEqual(plain(calls[1].body), cmd);
+
+    // Remembered: later commands go straight to the script
+    await ctx.postHaCommand(cmd, ha);
+    assert.equal(calls.length, 3);
+    assert.equal(calls[2].path, "/api/services/script/ev_charge_live_command");
+
+    // A different (e.g. newly paired admin) token tries the event again
+    await ctx.postHaCommand(cmd, { url: "https://ha", token: "other" });
+    assert.equal(calls[3].path, "/api/events/ev_charge_live_command");
+});
+
+test("APK → HA: verständliche Meldung, wenn Skript fehlt oder Token ungültig ist", async () => {
+    const missing = loadPostHaCommand((path) => (path.startsWith("/api/events/") ? 401 : 400));
+    const res = await missing.ctx.postHaCommand(CONTRACT.apk_command, { url: "https://ha", token: "user" });
+    assert.match(missing.ctx.describeHaCommandError(res), /ohne Admin-Rechte.*script\.ev_charge_live_command/);
+
+    const invalid = loadPostHaCommand(() => 401);
+    const res401 = await invalid.ctx.postHaCommand(CONTRACT.apk_command, { url: "https://ha", token: "bad" });
+    assert.match(invalid.ctx.describeHaCommandError(res401), /Token ungültig/);
+    assert.match(invalid.ctx.describeHaCommandError(null), /nicht erreichbar/);
 });

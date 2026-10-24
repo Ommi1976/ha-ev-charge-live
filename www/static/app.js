@@ -112,6 +112,8 @@ const sanitizeHttpUrl = (rawUrl, fallback = "#") => {
    ========================================================================== */
 const HA_BRIDGE_ENTITY = "sensor.ev_charge_live_bridge";
 const HA_COMMAND_EVENT = "ev_charge_live_command";
+// Created by the add-on; lets non-admin tokens send commands (HA allows events only for admins)
+const HA_COMMAND_SCRIPT = "ev_charge_live_command";
 const HA_BRIDGE_PROTOCOL = 1;
 const HA_BRIDGE_CACHE_MS = 5000;
 const HA_BRIDGE_RETRY_MS = 30000;
@@ -121,8 +123,10 @@ const HA_STATION_KEYS = ["id", "name", "operator", "address", "postal_code", "ci
 const HA_LIVE_KEYS = ["total_slots", "free_slots", "occupied_slots", "status", "status_text"];
 
 let haBridgeCache = { fetchedAt: 0, snapshot: null, error: "", promise: null };
-// After a 401 the token is not retried automatically: HA's IP ban counts failed logins
-let haAuthFailedToken = "";
+// After a 401 on a read the token is not retried automatically: HA's IP ban counts failed logins
+const haAuthState = { failedToken: "" };
+// Token that may read but not fire events (non-admin): commands go through the script
+const haCommandState = { scriptToken: "" };
 let haSessionPushInFlight = false;
 
 const isNativeApp = () => Boolean(window.Capacitor && typeof window.Capacitor.isNativePlatform === "function" && window.Capacitor.isNativePlatform());
@@ -147,20 +151,21 @@ const useHaRemote = () => isNativeApp() && Boolean(getHaRemoteConfig());
 
 function resetHaBridgeCache() {
     haBridgeCache = { fetchedAt: 0, snapshot: null, error: "", promise: null };
-    haAuthFailedToken = "";
+    haAuthState.failedToken = "";
+    haCommandState.scriptToken = "";
 }
 
 function describeHaHttpError(status) {
-    if (status === 401) return "Token ungültig oder ohne Admin-Rechte";
+    if (status === 401) return "Token ungültig oder abgelaufen";
     if (status === 403) return "Zugriff von Home Assistant verweigert";
-    if (status === 404) return "Add-on-Sensor fehlt – läuft EV Charge Live ab v1.3.19?";
+    if (status === 404) return "Add-on-Sensor fehlt – läuft EV Charge Live ab v1.3.21?";
     return status ? `Home Assistant antwortet mit HTTP ${status}` : "Home Assistant nicht erreichbar";
 }
 
 // Token-authenticated HA REST call. In the APK via native HTTP: needs no CORS entry in HA.
 async function haRequest(path, { method = "GET", body, timeoutMs = 6000, ha = getHaRemoteConfig() } = {}) {
     if (!ha) return null;
-    if (ha.token === haAuthFailedToken) return { ok: false, status: 401, data: null };
+    if (ha.token === haAuthState.failedToken) return { ok: false, status: 401, data: null };
     const headers = { "Authorization": `Bearer ${ha.token}`, "Accept": "application/json" };
     if (body !== undefined) headers["Content-Type"] = "application/json";
     let result;
@@ -191,8 +196,28 @@ async function haRequest(path, { method = "GET", body, timeoutMs = 6000, ha = ge
             if (timer) clearTimeout(timer);
         }
     }
-    if (result.status === 401) haAuthFailedToken = ha.token;
+    // Only a rejected read proves the token invalid; POST /api/events also answers 401 for non-admins
+    if (result.status === 401 && method === "GET") haAuthState.failedToken = ha.token;
     return result;
+}
+
+// Admin tokens fire the event directly; other tokens call the add-on's script (non-admins may call services)
+async function postHaCommand(command, ha = getHaRemoteConfig()) {
+    if (!ha) return null;
+    if (haCommandState.scriptToken !== ha.token) {
+        const res = await haRequest(`/api/events/${HA_COMMAND_EVENT}`, { method: "POST", body: command, ha });
+        if (!res || res.status !== 401) return res;
+        haCommandState.scriptToken = ha.token;
+    }
+    const res = await haRequest(`/api/services/script/${HA_COMMAND_SCRIPT}`, { method: "POST", body: command, ha });
+    return res ? { ...res, viaScript: true } : res;
+}
+
+function describeHaCommandError(res) {
+    if (res && res.viaScript && res.status === 400) {
+        return `Token ohne Admin-Rechte und Skript script.${HA_COMMAND_SCRIPT} fehlt – Add-on ab v1.3.21 starten oder Admin-Token nutzen`;
+    }
+    return describeHaHttpError(res ? res.status : 0);
 }
 
 // Mirrors the add-on's "vor X Min." for connectors (the bridge omits it to avoid recorder churn)
@@ -327,20 +352,20 @@ async function waitForHaCommandAck(requestId, timeoutMs) {
     return null;
 }
 
-// Fires a command on the HA event bus and waits until the add-on acknowledges it in the bridge sensor
+// Sends a command to the add-on (event or script) and waits until it is acknowledged in the bridge sensor
 async function runHaCommand(action, payload = {}, { ackTimeoutMs = 8000 } = {}) {
     const requestId = `apk_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`;
     let res;
     try {
-        res = await haRequest(`/api/events/${HA_COMMAND_EVENT}`, { method: "POST", body: buildHaCommand(action, payload, requestId) });
+        res = await postHaCommand(buildHaCommand(action, payload, requestId));
     } catch (e) {
         res = { ok: false, status: 0 };
     }
     if (!res || !res.ok) {
-        return { delivered: false, acked: false, ok: false, error: describeHaHttpError(res ? res.status : 0) };
+        return { delivered: false, acked: false, ok: false, error: describeHaCommandError(res) };
     }
     const ack = await waitForHaCommandAck(requestId, ackTimeoutMs);
-    if (!ack) return { delivered: true, acked: false, ok: false, error: "Add-on hat nicht bestätigt – läuft EV Charge Live ab v1.3.19?" };
+    if (!ack) return { delivered: true, acked: false, ok: false, error: "Add-on hat nicht bestätigt – läuft EV Charge Live ab v1.3.21?" };
     return { delivered: true, acked: true, ok: Boolean(ack.ok), error: ack.error || "" };
 }
 
@@ -3038,7 +3063,7 @@ window.clearObdDebugLog = function() {
 window.copyObdDebugLog = async function() {
     const metaEl = document.getElementById("obd-diag-meta");
     const header = [
-        "=== EV Charge Live OBD2 Diagnose-Protokoll (v1.3.19) ===",
+        "=== EV Charge Live OBD2 Diagnose-Protokoll (v1.3.21) ===",
         `Zeitpunkt: ${new Date().toISOString()}`,
         `Treiber-Info: ${metaEl ? metaEl.textContent : "n/a"}`,
         `Verbindungsstatus: connected=${bleConnection.connected}, connecting=${bleConnection.connecting}, transport=${bleConnection.transport || "none"}, deviceId=${bleConnection.deviceId || "none"}`,
@@ -5534,7 +5559,8 @@ window.testHaRemoteConnection = async function() {
         return;
     }
     setStatus("⏳ Verbinde mit Home Assistant …");
-    haAuthFailedToken = "";
+    haAuthState.failedToken = "";
+    haCommandState.scriptToken = "";
     try {
         const res = await haRequest(`/api/states/${HA_BRIDGE_ENTITY}`, { ha: { url, token } });
         if (!res.ok) {

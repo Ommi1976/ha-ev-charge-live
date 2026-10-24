@@ -289,7 +289,9 @@ DEFAULT_OPTIONS: Dict[str, Any] = {
     "home_assistant_integration": {
         "entity_prefix": "sensor.ev_charge_",
         "create_device_tracker": True,
-        "fire_ha_events": True
+        "fire_ha_events": True,
+        # Creates script.ev_charge_live_command for APK commands with non-admin tokens
+        "command_script": True
     },
     "logging": {
         "level": "info"
