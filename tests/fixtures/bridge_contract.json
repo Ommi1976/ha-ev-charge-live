@@ -1,0 +1,340 @@
+{
+  "_comment": "Contract between app/bridge.py + app/ha_events.py (add-on) and the APK client in app/static/app.js. Used by tests/test_bridge.py and tests/test_frontend.js.",
+  "apk_station": {
+    "id": "DE*SWH*E1001",
+    "name": "Hockenheim Pumpwerk",
+    "operator": "Stadtwerke Hockenheim",
+    "address": "Am Pumpwerk 1",
+    "postal_code": "68766",
+    "city": "Hockenheim",
+    "latitude": 49.3175,
+    "longitude": 8.5452,
+    "total_slots": 2,
+    "free_slots": 1,
+    "occupied_slots": 1,
+    "status": "PARTIAL",
+    "live_source": "EnBW Echtzeit (Direkt)",
+    "enbw_station_id": "12345",
+    "is_favorite": false,
+    "distance_km": 0.4,
+    "connectors": [
+      {
+        "point_label": "Ladepunkt 1",
+        "point_index": 1,
+        "evse_id": "DE*SWH*E1001*1",
+        "standard": "Typ 2",
+        "power_kw": 22,
+        "power_type": "AC",
+        "status": "AVAILABLE"
+      },
+      {
+        "point_label": "Ladepunkt 2",
+        "point_index": 2,
+        "evse_id": "DE*SWH*E1001*2",
+        "standard": "Typ 2",
+        "power_kw": 22,
+        "power_type": "AC",
+        "status": "OCCUPIED"
+      }
+    ]
+  },
+  "apk_command": {
+    "protocol": 1,
+    "action": "watchlist_add",
+    "request_id": "apk_test_1",
+    "station": {
+      "id": "DE*SWH*E1001",
+      "name": "Hockenheim Pumpwerk",
+      "operator": "Stadtwerke Hockenheim",
+      "address": "Am Pumpwerk 1",
+      "postal_code": "68766",
+      "city": "Hockenheim",
+      "latitude": 49.3175,
+      "longitude": 8.5452,
+      "total_slots": 2,
+      "free_slots": 1,
+      "occupied_slots": 1,
+      "status": "PARTIAL",
+      "live_source": "EnBW Echtzeit (Direkt)",
+      "enbw_station_id": "12345",
+      "connectors": [
+        {
+          "point_label": "Ladepunkt 1",
+          "point_index": 1,
+          "evse_id": "DE*SWH*E1001*1",
+          "standard": "Typ 2",
+          "power_kw": 22,
+          "power_type": "AC",
+          "status": "AVAILABLE"
+        },
+        {
+          "point_label": "Ladepunkt 2",
+          "point_index": 2,
+          "evse_id": "DE*SWH*E1001*2",
+          "standard": "Typ 2",
+          "power_kw": 22,
+          "power_type": "AC",
+          "status": "OCCUPIED"
+        }
+      ]
+    }
+  },
+  "bridge_inputs": {
+    "favorites": [
+      {
+        "id": "DE*SWH*E1001",
+        "name": "Hockenheim Pumpwerk",
+        "operator": "Stadtwerke Hockenheim",
+        "address": "Am Pumpwerk 1",
+        "postal_code": "68766",
+        "city": "Hockenheim",
+        "latitude": 49.3175,
+        "longitude": 8.5452,
+        "distance_km": 0.4,
+        "total_slots": 2,
+        "free_slots": 1,
+        "occupied_slots": 1,
+        "out_of_order_slots": 0,
+        "status": "PARTIAL",
+        "status_text": "1 von 2 frei",
+        "connectors": [
+          {
+            "point_label": "Ladepunkt 1",
+            "point_index": 1,
+            "standard": "Typ 2",
+            "power_kw": 22.0,
+            "power_type": "AC",
+            "status": "AVAILABLE",
+            "evse_id": "DE*SWH*E1001*1",
+            "updated_at": 1792857600000,
+            "since_time": "18:00",
+            "duration_str": "vor 5 Min.",
+            "duration_minutes": 5
+          },
+          {
+            "point_label": "Ladepunkt 2",
+            "point_index": 2,
+            "standard": "Typ 2",
+            "power_kw": 22.0,
+            "power_type": "AC",
+            "status": "OCCUPIED",
+            "evse_id": "DE*SWH*E1001*2",
+            "updated_at": 1792854000000,
+            "since_time": "17:00",
+            "duration_str": "vor 1 Std. 5 Min.",
+            "duration_minutes": 65
+          }
+        ],
+        "live_source": "EnBW Echtzeit",
+        "last_updated": "2026-10-23T17:55:00Z",
+        "enbw_station_id": "12345"
+      }
+    ],
+    "watchlist": [
+      {
+        "id": "DE*SWH*E1001",
+        "name": "Hockenheim Pumpwerk",
+        "operator": "Stadtwerke Hockenheim",
+        "address": "Am Pumpwerk 1",
+        "postal_code": "68766",
+        "city": "Hockenheim",
+        "latitude": 49.3175,
+        "longitude": 8.5452,
+        "distance_km": 0.4,
+        "total_slots": 2,
+        "free_slots": 1,
+        "occupied_slots": 1,
+        "out_of_order_slots": 0,
+        "status": "PARTIAL",
+        "status_text": "1 von 2 frei",
+        "connectors": [
+          {
+            "point_label": "Ladepunkt 1",
+            "point_index": 1,
+            "standard": "Typ 2",
+            "power_kw": 22.0,
+            "power_type": "AC",
+            "status": "AVAILABLE",
+            "evse_id": "DE*SWH*E1001*1",
+            "updated_at": 1792857600000,
+            "since_time": "18:00",
+            "duration_str": "vor 5 Min.",
+            "duration_minutes": 5
+          },
+          {
+            "point_label": "Ladepunkt 2",
+            "point_index": 2,
+            "standard": "Typ 2",
+            "power_kw": 22.0,
+            "power_type": "AC",
+            "status": "OCCUPIED",
+            "evse_id": "DE*SWH*E1001*2",
+            "updated_at": 1792854000000,
+            "since_time": "17:00",
+            "duration_str": "vor 1 Std. 5 Min.",
+            "duration_minutes": 65
+          }
+        ],
+        "live_source": "EnBW Echtzeit",
+        "last_updated": "2026-10-23T17:55:00Z",
+        "enbw_station_id": "12345"
+      },
+      {
+        "id": "DE*EBW*E2002",
+        "name": "EnBW Rathaus",
+        "operator": "EnBW",
+        "address": "Rathausstr. 3",
+        "postal_code": "68766",
+        "city": "Hockenheim",
+        "latitude": 49.32,
+        "longitude": 8.55,
+        "total_slots": 4,
+        "free_slots": 0,
+        "occupied_slots": 4,
+        "status": "OCCUPIED",
+        "connectors": [],
+        "live_source": "MobiData BW"
+      }
+    ],
+    "session": {
+      "station_id": "DE*SWH*E1001",
+      "station_name": "Hockenheim Pumpwerk",
+      "connector_label": "Ladepunkt 1 (Typ 2)",
+      "latitude": 49.3175,
+      "longitude": 8.5452,
+      "start_time_ms": 1792850400000,
+      "free_parking_minutes": 240,
+      "night_window_start": 21,
+      "night_window_end": 9,
+      "has_night_rule": true,
+      "target_soc": 80,
+      "start_soc": 40,
+      "target_reached_ms": 1792857600000,
+      "target_soc_eta_str": "ca. 18:00 Uhr",
+      "blocking_fee_per_min": 0.1,
+      "deadline_ms": 1792864800000,
+      "deadline_str": "20:00",
+      "deadline_iso": "2026-10-23T20:00:00+02:00",
+      "remaining_minutes": 113,
+      "state": "Frei laden",
+      "is_night_paused": false,
+      "notified_soc": false,
+      "notified_20": false
+    },
+    "recent_commands": [
+      {
+        "request_id": "apk_test_1",
+        "action": "watchlist_add",
+        "ok": true,
+        "error": null,
+        "at": "2026-10-23T16:07:00+00:00"
+      }
+    ]
+  },
+  "bridge_state": {
+    "entity_id": "sensor.ev_charge_live_bridge",
+    "state": "2",
+    "attributes": {
+      "protocol": 1,
+      "command_event": "ev_charge_live_command",
+      "favorite_ids": [
+        "DE*SWH*E1001"
+      ],
+      "watch_ids": [
+        "DE*SWH*E1001",
+        "DE*EBW*E2002"
+      ],
+      "session": {
+        "station_id": "DE*SWH*E1001",
+        "station_name": "Hockenheim Pumpwerk",
+        "connector_label": "Ladepunkt 1 (Typ 2)",
+        "latitude": 49.3175,
+        "longitude": 8.5452,
+        "start_time_ms": 1792850400000,
+        "free_parking_minutes": 240,
+        "night_window_start": 21,
+        "night_window_end": 9,
+        "has_night_rule": true,
+        "target_soc": 80,
+        "start_soc": 40,
+        "target_reached_ms": 1792857600000,
+        "target_soc_eta_str": "ca. 18:00 Uhr",
+        "blocking_fee_per_min": 0.1,
+        "deadline_ms": 1792864800000,
+        "deadline_str": "20:00",
+        "state": "Frei laden",
+        "is_night_paused": false
+      },
+      "recent_commands": [
+        {
+          "request_id": "apk_test_1",
+          "action": "watchlist_add",
+          "ok": true,
+          "error": null,
+          "at": "2026-10-23T16:07:00+00:00"
+        }
+      ],
+      "truncated": false,
+      "friendly_name": "EV Charge Live: APK-Bridge",
+      "icon": "mdi:cellphone-link",
+      "stations": [
+        {
+          "id": "DE*SWH*E1001",
+          "name": "Hockenheim Pumpwerk",
+          "operator": "Stadtwerke Hockenheim",
+          "address": "Am Pumpwerk 1",
+          "postal_code": "68766",
+          "city": "Hockenheim",
+          "latitude": 49.3175,
+          "longitude": 8.5452,
+          "total_slots": 2,
+          "free_slots": 1,
+          "occupied_slots": 1,
+          "status": "PARTIAL",
+          "status_text": "1 von 2 frei",
+          "live_source": "EnBW Echtzeit",
+          "last_updated": "2026-10-23T17:55:00Z",
+          "connectors": [
+            {
+              "point_label": "Ladepunkt 1",
+              "standard": "Typ 2",
+              "power_kw": 22.0,
+              "power_type": "AC",
+              "status": "AVAILABLE",
+              "since_time": "18:00",
+              "updated_at": 1792857600000
+            },
+            {
+              "point_label": "Ladepunkt 2",
+              "standard": "Typ 2",
+              "power_kw": 22.0,
+              "power_type": "AC",
+              "status": "OCCUPIED",
+              "since_time": "17:00",
+              "updated_at": 1792854000000
+            }
+          ]
+        },
+        {
+          "id": "DE*EBW*E2002",
+          "name": "EnBW Rathaus",
+          "operator": "EnBW",
+          "address": "Rathausstr. 3",
+          "postal_code": "68766",
+          "city": "Hockenheim",
+          "latitude": 49.32,
+          "longitude": 8.55,
+          "total_slots": 4,
+          "free_slots": 0,
+          "occupied_slots": 4,
+          "status": "OCCUPIED",
+          "live_source": "MobiData BW",
+          "connectors": []
+        }
+      ]
+    },
+    "last_changed": "2026-10-23T16:07:01.000000+00:00",
+    "last_updated": "2026-10-23T16:07:01.000000+00:00",
+    "last_reported": "2026-10-23T16:09:01.000000+00:00"
+  }
+}

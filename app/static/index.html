@@ -7,7 +7,7 @@
     <title>EV Charge Live Monitor</title>
     <!-- Leaflet CSS -->
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin=""/>
-    <link rel="stylesheet" href="static/style.css?v=20">
+    <link rel="stylesheet" href="static/style.css?v=21">
 </head>
 <body>
     <div class="app-container">
@@ -315,11 +315,16 @@
                         <div class="form-group">
                             <label for="cfg-ha-server-url">Home Assistant Server-URL (für APK-Fernzugriff):</label>
                             <input type="text" id="cfg-ha-server-url" placeholder="z.B. http://homeassistant.local:8123 oder Nabu Casa URL">
-                            <small>Ermöglicht der Smartphone-APK den direkten Zugriff auf das Live-Add-on und HA-Sensoren.</small>
+                            <small>Für unterwegs die externe URL (z.&nbsp;B. Nabu Casa) eintragen. Die APK nutzt nur die offizielle HA-API: Sie liest <code>sensor.ev_charge_live_bridge</code> und sendet Befehle als HA-Event – kein offener Add-on-Port nötig.</small>
                         </div>
                         <div class="form-group">
-                            <label for="cfg-ha-token">Long-Lived Access Token (optional):</label>
+                            <label for="cfg-ha-token">Long-Lived Access Token (für die APK):</label>
                             <input type="password" id="cfg-ha-token" placeholder="Bearer Token aus HA Profil (Sicherheit)">
+                            <small>Token eines Admin-Benutzers: Nur Admins dürfen über die HA-API Events senden (Watchlist, Lade-Wächter).</small>
+                        </div>
+                        <div class="form-group">
+                            <button type="button" class="btn btn-secondary" onclick="testHaRemoteConnection()">🔌 Verbindung zu Home Assistant testen</button>
+                            <small id="ha-remote-status" aria-live="polite"></small>
                         </div>
                         <div class="form-group">
                             <label for="cfg-device-tracker-entity">Smartphone-Standortgeber (Device Tracker):</label>

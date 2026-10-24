@@ -2906,3 +2906,13 @@ body.amoled-mode .leaflet-popup-content-wrapper {
 
 
 
+.ha-bridge-hint {
+    font-size: 0.75rem;
+    color: var(--text-secondary);
+    margin: 0 0 10px;
+}
+
+#ha-remote-status {
+    display: block;
+    margin-top: 6px;
+}

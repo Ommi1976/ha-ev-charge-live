@@ -1,13 +1,15 @@
 import asyncio
+from collections import deque
 import datetime
 import logging
 import math
 import os
 import re
-from typing import Any, Dict, Optional
+from typing import Any, Deque, Dict, Optional
 from zoneinfo import ZoneInfo
 import httpx
 
+from .bridge import BRIDGE_ENTITY_ID, MAX_RECENT_COMMANDS, build_bridge_attributes
 from .client import ev_client
 from .notifier import notifier
 from .storage import storage
@@ -105,6 +107,8 @@ class SyncWorker:
         self._token = os.getenv("SUPERVISOR_TOKEN", "")
         self._lock = asyncio.Lock()
         self._session_lock = asyncio.Lock()
+        self._bridge_lock = asyncio.Lock()
+        self._recent_commands: Deque[Dict[str, Any]] = deque(maxlen=MAX_RECENT_COMMANDS)
 
     def start(self) -> None:
         if self._running:
@@ -127,7 +131,7 @@ class SyncWorker:
     async def _run_loop(self) -> None:
         while self._running:
             # Independent steps: a failing station sync must not silence the charge guardian
-            for step in (self.sync_favorites, self.check_charge_session):
+            for step in (self.sync_favorites, self.check_charge_session, self.publish_bridge_state):
                 try:
                     await step()
                 except asyncio.CancelledError:
@@ -520,6 +524,36 @@ class SyncWorker:
                 await client.post(url, json=payload, headers=headers)
         except Exception as err:
             _LOGGER.debug("Failed to push session sensor to Home Assistant: %s", err)
+
+    def record_command(self, ack: Dict[str, Any]) -> None:
+        """Remembers a command acknowledgement for the next bridge publish."""
+        self._recent_commands.append(ack)
+
+    async def publish_bridge_state(self) -> None:
+        """Mirrors favorites, watchlist, charge session and command acks into the APK bridge sensor."""
+        if not self._token:
+            return
+        # Serialized and read inside the lock, so an older snapshot can never overwrite a newer one
+        async with self._bridge_lock:
+            attributes = build_bridge_attributes(
+                storage.load_favorites(),
+                storage.load_watchlist(),
+                storage.load_charge_session(),
+                list(self._recent_commands),
+            )
+            monitored = set(attributes["favorite_ids"]) | set(attributes["watch_ids"])
+            payload = {"state": str(len(monitored)), "attributes": attributes}
+            headers = {
+                "Authorization": f"Bearer {self._token}",
+                "Content-Type": "application/json"
+            }
+            try:
+                async with httpx.AsyncClient(timeout=8.0) as client:
+                    resp = await client.post(f"{SUPERVISOR_URL}/states/{BRIDGE_ENTITY_ID}", json=payload, headers=headers)
+                    if resp.status_code not in (200, 201):
+                        _LOGGER.warning("Failed to publish %s: HTTP %s", BRIDGE_ENTITY_ID, resp.status_code)
+            except Exception as err:
+                _LOGGER.warning("Error publishing %s: %s", BRIDGE_ENTITY_ID, err)
 
 
 poller = SyncWorker()

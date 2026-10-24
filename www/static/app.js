@@ -103,6 +103,311 @@ const sanitizeHttpUrl = (rawUrl, fallback = "#") => {
     return fallback;
 };
 
+/* ==========================================================================
+   APK unterwegs: Verbindung zum Add-on nur über die offizielle HA-REST-API
+   - Lesen:   GET  {HA}/api/states/sensor.ev_charge_live_bridge (vom Add-on gepflegt)
+   - Befehle: POST {HA}/api/events/ev_charge_live_command (Add-on quittiert per request_id)
+   Das Add-on selbst ist nur per Ingress erreichbar: Ingress-URLs enthalten einen zufälligen
+   Session-Token, ein Long-Lived-Token reicht dafür nicht.
+   ========================================================================== */
+const HA_BRIDGE_ENTITY = "sensor.ev_charge_live_bridge";
+const HA_COMMAND_EVENT = "ev_charge_live_command";
+const HA_BRIDGE_PROTOCOL = 1;
+const HA_BRIDGE_CACHE_MS = 5000;
+const HA_BRIDGE_RETRY_MS = 30000;
+const HA_BRIDGE_STALE_MS = 5 * 60 * 1000;
+const HA_VIA_SUFFIX = " · via Home Assistant";
+const HA_STATION_KEYS = ["id", "name", "operator", "address", "postal_code", "city", "latitude", "longitude", "total_slots", "free_slots", "occupied_slots", "status", "status_text", "live_source", "connectors", "enbw_station_id"];
+const HA_LIVE_KEYS = ["total_slots", "free_slots", "occupied_slots", "status", "status_text"];
+
+let haBridgeCache = { fetchedAt: 0, snapshot: null, error: "", promise: null };
+// After a 401 the token is not retried automatically: HA's IP ban counts failed logins
+let haAuthFailedToken = "";
+let haSessionPushInFlight = false;
+
+const isNativeApp = () => Boolean(window.Capacitor && typeof window.Capacitor.isNativePlatform === "function" && window.Capacitor.isNativePlatform());
+
+function normalizeHaBaseUrl(rawUrl) {
+    try {
+        const parsed = new URL(String(rawUrl || "").trim());
+        return (parsed.protocol === "https:" || parsed.protocol === "http:") ? parsed.origin : "";
+    } catch (e) {
+        return "";
+    }
+}
+
+function getHaRemoteConfig() {
+    const url = normalizeHaBaseUrl(localStorage.getItem("ev_ha_server_url") || currentConfig.ha_server_url);
+    const token = String(localStorage.getItem("ev_ha_token") || "").trim();
+    return url && token ? { url, token } : null;
+}
+
+// APK with HA URL + token: favorites, watchlist and Lade-Wächter live in the add-on
+const useHaRemote = () => isNativeApp() && Boolean(getHaRemoteConfig());
+
+function resetHaBridgeCache() {
+    haBridgeCache = { fetchedAt: 0, snapshot: null, error: "", promise: null };
+    haAuthFailedToken = "";
+}
+
+function describeHaHttpError(status) {
+    if (status === 401) return "Token ungültig oder ohne Admin-Rechte";
+    if (status === 403) return "Zugriff von Home Assistant verweigert";
+    if (status === 404) return "Add-on-Sensor fehlt – läuft EV Charge Live ab v1.3.19?";
+    return status ? `Home Assistant antwortet mit HTTP ${status}` : "Home Assistant nicht erreichbar";
+}
+
+// Token-authenticated HA REST call. In the APK via native HTTP: needs no CORS entry in HA.
+async function haRequest(path, { method = "GET", body, timeoutMs = 6000, ha = getHaRemoteConfig() } = {}) {
+    if (!ha) return null;
+    if (ha.token === haAuthFailedToken) return { ok: false, status: 401, data: null };
+    const headers = { "Authorization": `Bearer ${ha.token}`, "Accept": "application/json" };
+    if (body !== undefined) headers["Content-Type"] = "application/json";
+    let result;
+    const capHttp = window.Capacitor && window.Capacitor.Plugins && window.Capacitor.Plugins.CapacitorHttp;
+    if (capHttp && isNativeApp()) {
+        const res = await capHttp.request({
+            url: ha.url + path, method, headers, data: body, connectTimeout: timeoutMs, readTimeout: timeoutMs
+        });
+        let data = res.data;
+        if (typeof data === "string") {
+            try { data = JSON.parse(data); } catch (e) {}
+        }
+        result = { ok: res.status >= 200 && res.status < 300, status: res.status, data };
+    } else {
+        const controller = typeof AbortController === "function" ? new AbortController() : null;
+        const timer = controller ? setTimeout(() => controller.abort(), timeoutMs) : null;
+        try {
+            const resp = await fetch(ha.url + path, {
+                method,
+                headers,
+                body: body !== undefined ? JSON.stringify(body) : undefined,
+                signal: controller ? controller.signal : undefined
+            });
+            let data = null;
+            try { data = await resp.json(); } catch (e) {}
+            result = { ok: resp.ok, status: resp.status, data };
+        } finally {
+            if (timer) clearTimeout(timer);
+        }
+    }
+    if (result.status === 401) haAuthFailedToken = ha.token;
+    return result;
+}
+
+// Mirrors the add-on's "vor X Min." for connectors (the bridge omits it to avoid recorder churn)
+function formatSinceDuration(updatedAt, nowMs) {
+    const raw = String(updatedAt ?? "");
+    const ms = typeof updatedAt === "number" ? updatedAt : (/^\d+$/.test(raw) ? Number(raw) : Date.parse(raw));
+    if (!Number.isFinite(ms) || ms <= 0) return null;
+    const totalMins = Math.max(0, Math.floor((nowMs - ms) / 60000));
+    const hours = Math.floor(totalMins / 60);
+    return hours > 0 ? `vor ${hours} Std. ${totalMins % 60} Min.` : `vor ${totalMins} Min.`;
+}
+
+// Validates the bridge sensor state (HA REST JSON) into { favorites, watchlist, session, ... }
+function parseHaBridgeState(stateObj, nowMs = Date.now()) {
+    if (!stateObj || typeof stateObj !== "object" || stateObj.entity_id !== HA_BRIDGE_ENTITY) return null;
+    const attrs = stateObj.attributes;
+    if (!attrs || typeof attrs !== "object" || Number(attrs.protocol) !== HA_BRIDGE_PROTOCOL) return null;
+
+    const byId = new Map();
+    (Array.isArray(attrs.stations) ? attrs.stations : []).forEach(st => {
+        if (!st || typeof st !== "object" || st.id === undefined || st.id === null) return;
+        const connectors = (Array.isArray(st.connectors) ? st.connectors : [])
+            .filter(c => c && typeof c === "object")
+            .map(c => {
+                const dur = c.duration_str || formatSinceDuration(c.updated_at, nowMs);
+                return dur ? { ...c, duration_str: dur } : { ...c };
+            });
+        byId.set(String(st.id), { ...st, id: String(st.id), connectors });
+    });
+    const pick = (ids) => (Array.isArray(ids) ? ids : [])
+        .map(id => byId.get(String(id)))
+        .filter(Boolean)
+        .map(st => ({ ...st }));
+    const reportedAt = Date.parse(stateObj.last_reported || stateObj.last_updated || "");
+
+    return {
+        favorites: pick(attrs.favorite_ids),
+        watchlist: pick(attrs.watch_ids),
+        session: attrs.session && typeof attrs.session === "object" ? { ...attrs.session } : null,
+        recentCommands: Array.isArray(attrs.recent_commands) ? attrs.recent_commands.filter(c => c && typeof c === "object") : [],
+        truncated: Boolean(attrs.truncated),
+        reportedAt: Number.isFinite(reportedAt) ? reportedAt : null
+    };
+}
+
+// Direct search results + add-on data: monitored stations show the add-on's debounced live state,
+// so map, HA sensors and push notifications agree.
+function mergeHaBridgeStations(stations, snapshot, nowMs = Date.now()) {
+    const list = Array.isArray(stations) ? stations : [];
+    if (!snapshot) return list;
+    const favIds = new Set(snapshot.favorites.map(s => String(s.id)));
+    const watchIds = new Set(snapshot.watchlist.map(s => String(s.id)));
+    const monitored = new Map([...snapshot.favorites, ...snapshot.watchlist].map(s => [String(s.id), s]));
+    const flag = (st) => ({ ...st, is_favorite: favIds.has(String(st.id)), is_watched: watchIds.has(String(st.id)) });
+
+    // Direct search failed (offline MobiData etc.): show at least the monitored stations
+    if (list.length === 0) return [...monitored.values()].map(flag);
+
+    const fresh = !snapshot.reportedAt || nowMs - snapshot.reportedAt <= HA_BRIDGE_STALE_MS;
+    return list.map(st => {
+        const out = flag(st);
+        const live = fresh ? monitored.get(String(st.id)) : null;
+        if (live && Number.isFinite(Number(live.total_slots))) {
+            HA_LIVE_KEYS.forEach(k => { if (live[k] !== undefined) out[k] = live[k]; });
+            if (Array.isArray(live.connectors) && live.connectors.length > 0) out.connectors = live.connectors;
+            out.live_source = String(live.live_source || "Add-on").replace(HA_VIA_SUFFIX, "") + HA_VIA_SUFFIX;
+        }
+        return out;
+    });
+}
+
+// Unconfirmed local session wins (pending hand-over); otherwise the add-on's Lade-Wächter is the truth
+function reconcileChargeSession(local, remote) {
+    if (local && !local.ha_synced) return local;
+    return remote ? { ...remote, ha_synced: true } : null;
+}
+
+function compactStationForHa(st) {
+    const out = {};
+    HA_STATION_KEYS.forEach(k => {
+        if (st[k] !== undefined && st[k] !== null) out[k] = st[k];
+    });
+    if (Array.isArray(out.connectors)) out.connectors = out.connectors.slice(0, 20);
+    out.id = String(st.id);
+    return out;
+}
+
+function buildHaCommand(action, payload, requestId) {
+    const cmd = { protocol: HA_BRIDGE_PROTOCOL, action, request_id: requestId };
+    if (payload && payload.station) cmd.station = compactStationForHa(payload.station);
+    if (payload && payload.session) cmd.session = payload.session;
+    return cmd;
+}
+
+function findHaCommandAck(snapshot, requestId) {
+    if (!snapshot || !requestId) return null;
+    return snapshot.recentCommands.find(c => c.request_id === requestId) || null;
+}
+
+async function getHaBridgeState({ force = false } = {}) {
+    if (!getHaRemoteConfig()) return null;
+    const age = Date.now() - haBridgeCache.fetchedAt;
+    if (!force && age < (haBridgeCache.snapshot ? HA_BRIDGE_CACHE_MS : HA_BRIDGE_RETRY_MS)) return haBridgeCache.snapshot;
+    if (haBridgeCache.promise) return haBridgeCache.promise;
+    haBridgeCache.promise = (async () => {
+        let snapshot = null;
+        let error = "";
+        try {
+            const res = await haRequest(`/api/states/${HA_BRIDGE_ENTITY}`);
+            if (res && res.ok) {
+                snapshot = parseHaBridgeState(res.data);
+                if (!snapshot) error = "Add-on-Sensor hat ein unbekanntes Format – App und Add-on aktualisieren";
+            } else {
+                error = describeHaHttpError(res ? res.status : 0);
+            }
+        } catch (e) {
+            error = describeHaHttpError(0);
+        }
+        haBridgeCache = { fetchedAt: Date.now(), snapshot, error, promise: null };
+        return snapshot;
+    })();
+    return haBridgeCache.promise;
+}
+
+async function waitForHaCommandAck(requestId, timeoutMs) {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+        await new Promise(resolve => setTimeout(resolve, 1200));
+        const ack = findHaCommandAck(await getHaBridgeState({ force: true }), requestId);
+        if (ack) return ack;
+    }
+    return null;
+}
+
+// Fires a command on the HA event bus and waits until the add-on acknowledges it in the bridge sensor
+async function runHaCommand(action, payload = {}, { ackTimeoutMs = 8000 } = {}) {
+    const requestId = `apk_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`;
+    let res;
+    try {
+        res = await haRequest(`/api/events/${HA_COMMAND_EVENT}`, { method: "POST", body: buildHaCommand(action, payload, requestId) });
+    } catch (e) {
+        res = { ok: false, status: 0 };
+    }
+    if (!res || !res.ok) {
+        return { delivered: false, acked: false, ok: false, error: describeHaHttpError(res ? res.status : 0) };
+    }
+    const ack = await waitForHaCommandAck(requestId, ackTimeoutMs);
+    if (!ack) return { delivered: true, acked: false, ok: false, error: "Add-on hat nicht bestätigt – läuft EV Charge Live ab v1.3.19?" };
+    return { delivered: true, acked: true, ok: Boolean(ack.ok), error: ack.error || "" };
+}
+
+function showHaCommandToast(result, successText) {
+    if (result.ok) showToast(successText, "success");
+    else if (result.delivered && !result.acked) showToast(`⚠️ Von Home Assistant angenommen, aber: ${result.error}`, "warning");
+    else showToast(`❌ Nicht gespeichert: ${result.error}`, "error");
+}
+
+function applyStationList(kind, list) {
+    if (kind === "watchlist") {
+        watchlist = list;
+    } else {
+        favorites = list;
+        document.getElementById("fav-count").innerText = favorites.length;
+        renderMapMarkers(activeStations, false);
+    }
+    try {
+        localStorage.setItem(kind === "watchlist" ? "ev_watchlist" : "ev_favorites", JSON.stringify(list));
+    } catch (e) {}
+    renderFavoritesModal();
+    updateSheetWatchButton();
+}
+
+// APK: change favorites/watchlist in the add-on; optimistic UI, rolled back unless HA accepted it
+async function setStationListViaHa(kind, station, enabled) {
+    const current = kind === "watchlist" ? watchlist : favorites;
+    const previous = current.slice();
+    const others = current.filter(s => String(s.id) !== String(station.id));
+    applyStationList(kind, enabled ? [...others, station] : others);
+
+    const prefix = kind === "watchlist" ? "watchlist" : "favorite";
+    const result = await runHaCommand(`${prefix}_${enabled ? "add" : "remove"}`, { station });
+    if (!result.delivered || (result.acked && !result.ok)) {
+        applyStationList(kind, previous);
+    } else if (result.acked) {
+        const snapshot = await getHaBridgeState();
+        if (snapshot) applyStationList(kind, kind === "watchlist" ? snapshot.watchlist : snapshot.favorites);
+    }
+    return result;
+}
+
+// Ingress add-on backend (same origin). The APK has none: callers fall back to HA bridge / localStorage.
+async function fetchAddonJson(endpoint, options) {
+    if (isNativeApp()) throw new Error("APK: kein Ingress-Backend");
+    const resp = await fetch(getApiUrl(endpoint), options);
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    return resp.json();
+}
+
+// APK: list from the add-on via HA (cached locally for offline use), else the local list
+async function loadRemoteOrLocalList(kind) {
+    const storageKey = kind === "watchlist" ? "ev_watchlist" : "ev_favorites";
+    const snapshot = useHaRemote() ? await getHaBridgeState() : null;
+    if (snapshot) {
+        const list = kind === "watchlist" ? snapshot.watchlist : snapshot.favorites;
+        try { localStorage.setItem(storageKey, JSON.stringify(list)); } catch (e) {}
+        return list;
+    }
+    try {
+        const local = JSON.parse(localStorage.getItem(storageKey) || "[]");
+        return Array.isArray(local) ? local : [];
+    } catch (e) {
+        return [];
+    }
+}
+
 function getActiveSoc() {
     if (cupraState.liveSoc !== null && cupraState.liveSoc !== undefined && !isNaN(Number(cupraState.liveSoc))) {
         return Math.min(100, Math.max(0, Number(cupraState.liveSoc)));
@@ -211,6 +516,7 @@ document.addEventListener("DOMContentLoaded", async () => {
         await searchStations(false);
         await loadFavorites();
         await loadWatchlist();
+        await syncChargeSessionFromHa();
     }, 60000);
 
     // Auto-Reconnect Watchdog bei App-Start (nach 2,5 Sekunden zur Entlastung des Boots)
@@ -475,16 +781,10 @@ async function loadConfig() {
 // Favorites Loading
 async function loadFavorites() {
     try {
-        const resp = await fetch(getApiUrl("api/favorites"));
-        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-        const data = await resp.json();
+        const data = await fetchAddonJson("api/favorites");
         favorites = Array.isArray(data) ? data : [];
     } catch (err) {
-        try {
-            favorites = JSON.parse(localStorage.getItem("ev_favorites") || "[]");
-        } catch (e) {
-            favorites = [];
-        }
+        favorites = await loadRemoteOrLocalList("favorites");
     }
     document.getElementById("fav-count").innerText = favorites.length;
     renderFavoritesModal();
@@ -493,16 +793,10 @@ async function loadFavorites() {
 // Watchlist (Push-Beobachtungsliste) Loading
 async function loadWatchlist() {
     try {
-        const resp = await fetch(getApiUrl("api/watchlist"));
-        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-        const data = await resp.json();
+        const data = await fetchAddonJson("api/watchlist");
         watchlist = Array.isArray(data) ? data : [];
     } catch (err) {
-        try {
-            watchlist = JSON.parse(localStorage.getItem("ev_watchlist") || "[]");
-        } catch (e) {
-            watchlist = [];
-        }
+        watchlist = await loadRemoteOrLocalList("watchlist");
     }
     renderFavoritesModal();
     updateSheetWatchButton();
@@ -515,19 +809,23 @@ window.toggleWatchlist = async function(stationId) {
                     (window.currentSheetStation && String(window.currentSheetStation.id) === String(stationId) ? window.currentSheetStation : null);
     if (!station) return;
 
+    if (useHaRemote()) {
+        const enable = !isWatched(stationId);
+        const result = await setStationListViaHa("watchlist", station, enable);
+        showHaCommandToast(result, enable
+            ? `🔔 "${station.name}" wird in Home Assistant beobachtet (Push-Alarm bei freiem Platz aktiv)`
+            : `🔕 "${station.name}" von der Beobachtungsliste in Home Assistant entfernt`);
+        return;
+    }
+
     let isWatchedNow = false;
     try {
-        const resp = await fetch(getApiUrl("api/watchlist/toggle"), {
+        const res = await fetchAddonJson("api/watchlist/toggle", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify(station)
         });
-        if (resp.ok) {
-            const res = await resp.json();
-            isWatchedNow = res.is_watched;
-        } else {
-            throw new Error(`HTTP ${resp.status}`);
-        }
+        isWatchedNow = res.is_watched;
     } catch (err) {
         let localWl = [];
         try { localWl = JSON.parse(localStorage.getItem("ev_watchlist") || "[]"); } catch (e) {}
@@ -1020,41 +1318,21 @@ async function searchStations(adjustView = false) {
     }
 
     try {
-        const resp = await fetch(getApiUrl(`api/stations?${params.toString()}`));
-        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-        const data = await resp.json();
+        const data = await fetchAddonJson(`api/stations?${params.toString()}`);
         activeStations = Array.isArray(data) ? data : [];
     } catch (err) {
-        let fetchedFromHa = false;
-        const haUrl = currentConfig.ha_server_url || localStorage.getItem("ev_ha_server_url");
-        const haToken = currentConfig.ha_token || localStorage.getItem("ev_ha_token");
-        if (haUrl && haUrl.trim()) {
-            try {
-                const cleanHa = haUrl.trim().replace(/\/+$/, "");
-                const headers = { "Accept": "application/json" };
-                if (haToken) headers["Authorization"] = `Bearer ${haToken.trim()}`;
-                const haResp = await fetch(`${cleanHa}/api/hassio_ingress/ev_charge_live/api/stations?${params.toString()}`, { headers });
-                if (haResp.ok) {
-                    const haData = await haResp.json();
-                    if (Array.isArray(haData) && haData.length > 0) {
-                        activeStations = haData;
-                        fetchedFromHa = true;
-                    }
-                }
-            } catch (haErr) {
-                console.warn("HA Remote Sync failed:", haErr);
-            }
-        }
-
-        if (!fetchedFromHa) {
-            activeStations = await searchStationsDirectClient(
+        // APK: search directly at MobiData/EnBW; favorites & watchlist get the add-on's data from HA
+        const [direct, snapshot] = await Promise.all([
+            searchStationsDirectClient(
                 city,
                 postalCode,
                 currentDeviceCoords ? currentDeviceCoords.lat : null,
                 currentDeviceCoords ? currentDeviceCoords.lon : null,
                 radius
-            );
-        }
+            ),
+            useHaRemote() ? getHaBridgeState() : Promise.resolve(null)
+        ]);
+        activeStations = mergeHaBridgeStations(direct, snapshot);
     }
 
     // Synchronize live slot counts into favorites array & localStorage
@@ -2059,19 +2337,23 @@ window.toggleFavorite = async function(stationId) {
                     (window.currentSheetStation && String(window.currentSheetStation.id) === String(stationId) ? window.currentSheetStation : null);
     if (!station) return;
 
+    if (useHaRemote()) {
+        const enable = !isFavorite(stationId);
+        const result = await setStationListViaHa("favorites", station, enable);
+        showHaCommandToast(result, enable
+            ? `★ "${station.name}" in Home Assistant als Favorit gespeichert`
+            : `☆ "${station.name}" aus den Favoriten in Home Assistant entfernt`);
+        return;
+    }
+
     let isFavNow = false;
     try {
-        const resp = await fetch(getApiUrl("api/favorites/toggle"), {
+        const res = await fetchAddonJson("api/favorites/toggle", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify(station)
         });
-        if (resp.ok) {
-            const res = await resp.json();
-            isFavNow = res.is_favorite;
-        } else {
-            throw new Error(`HTTP ${resp.status}`);
-        }
+        isFavNow = res.is_favorite;
     } catch (err) {
         // Standalone LocalStorage fallback für APK
         let localFavs = [];
@@ -2104,7 +2386,18 @@ function renderFavoritesModal() {
         return;
     }
 
-    list.innerHTML = favorites.map(f => {
+    let sourceHint = "";
+    if (useHaRemote()) {
+        const snap = haBridgeCache.snapshot;
+        const when = snap && snap.reportedAt
+            ? new Date(snap.reportedAt).toLocaleTimeString("de-DE", { hour: "2-digit", minute: "2-digit" })
+            : "";
+        sourceHint = snap
+            ? `<p class="ha-bridge-hint">🏠 Live-Daten vom Home-Assistant-Add-on${when ? ` · Stand ${escapeHtml(when)} Uhr` : ""}</p>`
+            : `<p class="ha-bridge-hint">⚠️ Home Assistant gerade nicht erreichbar${haBridgeCache.error ? ` (${escapeHtml(haBridgeCache.error)})` : ""} – letzter bekannter Stand</p>`;
+    }
+
+    list.innerHTML = sourceHint + favorites.map(f => {
         let statusBadge = "badge-success";
         if (f.status === "OUTOFORDER") statusBadge = "badge-danger";
         else if (f.free_slots === 0) statusBadge = "badge-danger";
@@ -2245,8 +2538,15 @@ async function triggerSync() {
     const btn = document.getElementById("btn-sync");
     btn.innerHTML = `<span class="btn-icon">⏳</span><span class="btn-text">Sync...</span>`;
     try {
-        await fetch(getApiUrl("api/sync"), { method: "POST" });
+        if (useHaRemote()) {
+            // Add-on acknowledges only after its live poll, so the reload below gets fresh data
+            const result = await runHaCommand("sync", {}, { ackTimeoutMs: 25000 });
+            if (!result.ok) throw new Error(result.error);
+        } else {
+            await fetch(getApiUrl("api/sync"), { method: "POST" });
+        }
         await loadFavorites();
+        await loadWatchlist();
         await searchStations(false);
         showToast("🔄 Live-Daten erfolgreich synchronisiert", "success");
     } catch (err) {
@@ -2262,6 +2562,12 @@ async function sendTestPush() {
     btn.disabled = true;
     btn.innerText = "Sende Test-Push...";
     try {
+        if (useHaRemote()) {
+            const result = await runHaCommand("test_notify", {}, { ackTimeoutMs: 15000 });
+            if (result.ok) showToast("✅ Test-Benachrichtigung über Home Assistant verschickt!", "success");
+            else showToast(`⚠️ Test-Push fehlgeschlagen: ${result.error}`, "warning");
+            return;
+        }
         const resp = await fetch(getApiUrl("api/test-notify"), { method: "POST" });
         const res = await resp.json();
         if (res.delivered) {
@@ -2303,6 +2609,7 @@ async function saveSettings(e) {
     const haTokenInput = document.getElementById("cfg-ha-token");
     if (haServerUrlInput) localStorage.setItem("ev_ha_server_url", haServerUrlInput.value.trim());
     if (haTokenInput) localStorage.setItem("ev_ha_token", haTokenInput.value.trim());
+    resetHaBridgeCache();
 
     const deviceCheckboxes = document.querySelectorAll('input[name="cfg-target-device"]:checked');
     let targetDevices = Array.from(deviceCheckboxes).map(cb => cb.value);
@@ -3947,14 +4254,21 @@ window.startSmartChargeGuardian = async function(params) {
     activeChargeSession = sessionData;
     localStorage.setItem("ev_charge_session", JSON.stringify(sessionData));
 
-    try {
-        await fetch(getApiUrl("api/charge-session/start"), {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(sessionData)
+    if (useHaRemote()) {
+        // The add-on's Lade-Wächter keeps pushing while the phone sleeps; confirmation arrives async
+        pushChargeSessionToHa(sessionData).then(result => {
+            if (!result.ok) showToast(`⚠️ Lade-Wächter läuft vorerst nur in der App: ${result.error}`, "warning");
         });
-    } catch (e) {
-        console.warn("Could not sync charge session to HA backend:", e);
+    } else if (!isNativeApp()) {
+        try {
+            await fetch(getApiUrl("api/charge-session/start"), {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(sessionData)
+            });
+        } catch (e) {
+            console.warn("Could not sync charge session to HA backend:", e);
+        }
     }
 
     startChargeSessionInterval();
@@ -3967,12 +4281,60 @@ window.stopSmartChargeGuardian = async function() {
     if (chargeSessionInterval) clearInterval(chargeSessionInterval);
     activeChargeSession = null;
     localStorage.removeItem("ev_charge_session");
-    try {
-        await fetch(getApiUrl("api/charge-session/stop"), { method: "POST" });
-    } catch (e) {}
+    if (useHaRemote()) {
+        runHaCommand("session_stop").then(result => {
+            if (!result.ok) showToast(`⚠️ Lade-Wächter in Home Assistant nicht beendet: ${result.error}`, "warning");
+        });
+    } else if (!isNativeApp()) {
+        try {
+            await fetch(getApiUrl("api/charge-session/stop"), { method: "POST" });
+        } catch (e) {}
+    }
     updateStatusBanner();
     showToast("⏹️ Lade-Wächter beendet.", "info");
 };
+
+// APK: hand the session to the add-on; marked ha_synced only once the add-on confirmed it
+async function pushChargeSessionToHa(session) {
+    if (haSessionPushInFlight) return { delivered: false, acked: false, ok: false, error: "Übertragung läuft bereits" };
+    haSessionPushInFlight = true;
+    try {
+        const result = await runHaCommand("session_start", { session });
+        const stillCurrent = activeChargeSession &&
+            activeChargeSession.start_time_ms === session.start_time_ms &&
+            String(activeChargeSession.station_id) === String(session.station_id);
+        if (result.ok && stillCurrent) {
+            activeChargeSession.ha_synced = true;
+            localStorage.setItem("ev_charge_session", JSON.stringify(activeChargeSession));
+        }
+        return result;
+    } finally {
+        haSessionPushInFlight = false;
+    }
+}
+
+// APK: adopt the add-on's Lade-Wächter (stopped/started in HA or Ingress) once HA is reachable
+async function syncChargeSessionFromHa() {
+    if (!useHaRemote()) return;
+    const snapshot = await getHaBridgeState();
+    if (!snapshot) return;
+    if (activeChargeSession && !activeChargeSession.ha_synced) {
+        // Started offline or confirmation missed: hand it over now (add-on keeps alert flags of re-sends)
+        pushChargeSessionToHa(activeChargeSession);
+        return;
+    }
+    const next = reconcileChargeSession(activeChargeSession, snapshot.session);
+    if (JSON.stringify(next) === JSON.stringify(activeChargeSession)) return;
+    activeChargeSession = next;
+    if (next) {
+        localStorage.setItem("ev_charge_session", JSON.stringify(next));
+        startChargeSessionInterval();
+    } else {
+        localStorage.removeItem("ev_charge_session");
+        if (chargeSessionInterval) clearInterval(chargeSessionInterval);
+    }
+    updateStatusBanner();
+}
 
 function startChargeSessionInterval() {
     if (chargeSessionInterval) clearInterval(chargeSessionInterval);
@@ -4010,6 +4372,11 @@ function initParkStatus() {
         console.warn("Could not load park status", e);
     }
     updateStatusBanner();
+
+    if (isNativeApp()) {
+        syncChargeSessionFromHa();
+        return;
+    }
 
     // Background sync with HA charge session
     fetch(getApiUrl("api/charge-session"))
@@ -4706,11 +5073,16 @@ function onQrCodeScanned(qrText) {
         if (haUrlInput) haUrlInput.value = pairingUrl;
         if (haTokenInput && pairingToken) haTokenInput.value = pairingToken;
 
+        resetHaBridgeCache();
         closeQrScannerModal();
         showToast(`🎉 Home Assistant erfolgreich gekoppelt! Server: ${pairingUrl}`, "success");
 
-        // Sofortige Datenaktualisierung anstoßen
-        searchStations(false);
+        // Sofortige Datenaktualisierung: Favoriten, Watchlist & Lade-Wächter kommen jetzt aus HA
+        loadFavorites()
+            .then(loadWatchlist)
+            .then(() => searchStations(false))
+            .then(syncChargeSessionFromHa)
+            .catch(err => console.warn("Datenabgleich nach Kopplung fehlgeschlagen:", err));
         return;
     }
 
@@ -5141,6 +5513,50 @@ window.showRouteOnMainMap = function() {
 
     map.fitBounds(routePolylineLayer.getBounds(), { padding: [50, 50] });
     showToast("🗺️ Route & Ladestopps auf der Karte eingezeichnet", "info");
+};
+
+// Settings: checks the typed URL/token against the add-on's bridge sensor (before saving)
+window.testHaRemoteConnection = async function() {
+    const statusEl = document.getElementById("ha-remote-status");
+    const setStatus = (text, color = "") => {
+        if (!statusEl) return;
+        statusEl.textContent = text;
+        statusEl.style.color = color;
+    };
+    if (!isNativeApp()) {
+        setStatus("ℹ️ Der Test läuft in der Android-App – im Browser blockiert Home Assistant den Direktzugriff (CORS).", "#f59e0b");
+        return;
+    }
+    const url = normalizeHaBaseUrl(document.getElementById("cfg-ha-server-url")?.value);
+    const token = (document.getElementById("cfg-ha-token")?.value || "").trim();
+    if (!url || !token) {
+        setStatus("Bitte Server-URL (http:// oder https://) und Long-Lived Token eintragen.", "#f59e0b");
+        return;
+    }
+    setStatus("⏳ Verbinde mit Home Assistant …");
+    haAuthFailedToken = "";
+    try {
+        const res = await haRequest(`/api/states/${HA_BRIDGE_ENTITY}`, { ha: { url, token } });
+        if (!res.ok) {
+            setStatus(`❌ ${describeHaHttpError(res.status)}`, "#ef4444");
+            return;
+        }
+        const snapshot = parseHaBridgeState(res.data);
+        if (!snapshot) {
+            setStatus("❌ Add-on-Sensor hat ein unbekanntes Format – App und Add-on aktualisieren.", "#ef4444");
+            return;
+        }
+        const when = snapshot.reportedAt
+            ? new Date(snapshot.reportedAt).toLocaleTimeString("de-DE", { hour: "2-digit", minute: "2-digit" })
+            : "?";
+        setStatus(
+            `✅ Verbunden: ${snapshot.favorites.length} Favoriten, ${snapshot.watchlist.length} beobachtet` +
+            `${snapshot.session ? ", Lade-Wächter aktiv" : ""} (Add-on-Stand ${when} Uhr). Speichern nicht vergessen.`,
+            "#10b981"
+        );
+    } catch (e) {
+        setStatus(`❌ ${describeHaHttpError(0)}`, "#ef4444");
+    }
 };
 
 /* ==========================================================================

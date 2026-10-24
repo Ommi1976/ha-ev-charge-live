@@ -105,7 +105,8 @@ SESSION_STR_KEYS = (
     "station_id", "station_name", "connector_label", "target_soc_eta_str",
     "deadline_str", "deadline_iso", "state",
 )
-SESSION_BOOL_KEYS = ("has_night_rule", "is_night_paused", "notified_soc", "notified_20", "notified_5", "notified_fee")
+SESSION_ALERT_FLAGS = ("notified_soc", "notified_20", "notified_5", "notified_fee")
+SESSION_BOOL_KEYS = ("has_night_rule", "is_night_paused") + SESSION_ALERT_FLAGS
 # Epoch milliseconds between 2001 and 2096
 SESSION_MS_KEYS = ("start_time_ms", "target_reached_ms", "deadline_ms")
 SESSION_MS_RANGE = (1_000_000_000_000, 4_000_000_000_000)
@@ -172,6 +173,16 @@ def sanitize_charge_session(session: Dict[str, Any]) -> Dict[str, Any]:
             val = _safe_float(session[key], lo, hi)
             if val is not None:
                 clean[key] = val
+    return clean
+
+
+def prepare_charge_session(session: Any, now_ms: int) -> Dict[str, Any]:
+    """Validates a new charge session (Ingress POST or APK event); raises ValueError if unusable."""
+    clean = sanitize_charge_session(session)
+    if not clean.get("station_id") and not clean.get("station_name"):
+        raise ValueError("station_id or station_name required")
+    # Missing/invalid start time would push the deadline forward on every poll -> never alert
+    clean.setdefault("start_time_ms", now_ms)
     return clean
 
 
@@ -424,23 +435,38 @@ class StorageManager:
         favs = self.load_favorites()
         return any(str(f.get("id")) == str(station_id) for f in favs)
 
+    def _set_membership(self, load, save, station_data: Dict[str, Any], enabled: bool, limit_error: str) -> bool:
+        """Idempotently adds/removes a station from a list. Returns True if the list changed."""
+        station_data = sanitize_station(station_data)
+        with self._lock:
+            items = load()
+            station_id = station_data["id"]
+            present = any(str(item.get("id")) == station_id for item in items)
+            if present == enabled:
+                return False
+            if enabled:
+                if len(items) >= MAX_STATION_LIST:
+                    raise ValueError(limit_error)
+                items.append(station_data)
+            else:
+                items = [item for item in items if str(item.get("id")) != station_id]
+            save(items)
+            return True
+
+    def set_favorite(self, station_data: Dict[str, Any], enabled: bool) -> bool:
+        """Adds (enabled=True) or removes a favorite; safe to repeat. Returns True if changed."""
+        return self._set_membership(
+            self.load_favorites, self.save_favorites, station_data, enabled,
+            f"Maximal {MAX_STATION_LIST} Favoriten erlaubt"
+        )
+
     def toggle_favorite(self, station_data: Dict[str, Any]) -> bool:
         """Toggles favorite status. Returns True if added, False if removed."""
         station_data = sanitize_station(station_data)
         with self._lock:
-            favs = self.load_favorites()
-            station_id = str(station_data.get("id"))
-            existing = next((f for f in favs if str(f.get("id")) == station_id), None)
-            if existing:
-                favs = [f for f in favs if str(f.get("id")) != station_id]
-                self.save_favorites(favs)
-                return False
-            else:
-                if len(favs) >= MAX_STATION_LIST:
-                    raise ValueError(f"Maximal {MAX_STATION_LIST} Favoriten erlaubt")
-                favs.append(station_data)
-                self.save_favorites(favs)
-                return True
+            enabled = not self.is_favorite(station_data["id"])
+            self.set_favorite(station_data, enabled)
+            return enabled
 
     def load_watchlist(self) -> List[Dict[str, Any]]:
         """Loads list of stations explicitly placed on the push notification watchlist (with latest live data)."""
@@ -461,23 +487,20 @@ class StorageManager:
         wl = self.load_watchlist()
         return any(str(item.get("id")) == str(station_id) for item in wl)
 
+    def set_watchlist(self, station_data: Dict[str, Any], enabled: bool) -> bool:
+        """Adds (enabled=True) or removes a watchlist station; safe to repeat. Returns True if changed."""
+        return self._set_membership(
+            self.load_watchlist, self.save_watchlist, station_data, enabled,
+            f"Maximal {MAX_STATION_LIST} Stationen auf der Watchlist erlaubt"
+        )
+
     def toggle_watchlist(self, station_data: Dict[str, Any]) -> bool:
         """Toggles watchlist status. Returns True if added, False if removed."""
         station_data = sanitize_station(station_data)
         with self._lock:
-            wl = self.load_watchlist()
-            station_id = str(station_data.get("id"))
-            existing = next((item for item in wl if str(item.get("id")) == station_id), None)
-            if existing:
-                wl = [item for item in wl if str(item.get("id")) != station_id]
-                self.save_watchlist(wl)
-                return False
-            else:
-                if len(wl) >= MAX_STATION_LIST:
-                    raise ValueError(f"Maximal {MAX_STATION_LIST} Stationen auf der Watchlist erlaubt")
-                wl.append(station_data)
-                self.save_watchlist(wl)
-                return True
+            enabled = not self.is_on_watchlist(station_data["id"])
+            self.set_watchlist(station_data, enabled)
+            return enabled
 
     def update_watchlist_live(self, live_map: Dict[str, Dict[str, Any]]) -> bool:
         """Updates watchlist items with fresh live data. Returns True when watchlist.json was rewritten."""
@@ -537,6 +560,15 @@ class StorageManager:
             except Exception as err:
                 _LOGGER.error("Failed to save charge session: %s", err)
                 return False
+
+    def start_charge_session(self, session: Dict[str, Any]) -> None:
+        """Saves a newly started session. A re-sent copy of the active session (e.g. the APK
+        missed the add-on's ack) keeps its alert flags, so no push notification repeats."""
+        with self._lock:
+            current = self.load_charge_session()
+            if current and charge_session_key(current) == charge_session_key(session):
+                session = {**session, **{flag: True for flag in SESSION_ALERT_FLAGS if current.get(flag)}}
+            self.save_charge_session(session)
 
     def clear_charge_session(self) -> None:
         """Removes the active charging session file."""
