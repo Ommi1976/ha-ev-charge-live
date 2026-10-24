@@ -320,7 +320,7 @@
                         <div class="form-group">
                             <label for="cfg-ha-token">Long-Lived Access Token (für die APK):</label>
                             <input type="password" id="cfg-ha-token" placeholder="Bearer Token aus HA Profil (Sicherheit)">
-                            <small>Token eines Admin-Benutzers: Nur Admins dürfen über die HA-API Events senden (Watchlist, Lade-Wächter).</small>
+                            <small>Ein eigener HA-Benutzer ohne Admin-Rechte genügt: Änderungen (Watchlist, Lade-Wächter) laufen dann über das vom Add-on angelegte Skript <code>script.ev_charge_live_command</code>.</small>
                         </div>
                         <div class="form-group">
                             <button type="button" class="btn btn-secondary" onclick="testHaRemoteConnection()">🔌 Verbindung zu Home Assistant testen</button>

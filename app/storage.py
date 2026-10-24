@@ -246,7 +246,9 @@ DEFAULT_OPTIONS: Dict[str, Any] = {
         "create_device_tracker": True,
         "fire_ha_events": True,
         "mqtt_enabled": False,
-        "mqtt_topic_prefix": "homeassistant/sensor/ev_charge"
+        "mqtt_topic_prefix": "homeassistant/sensor/ev_charge",
+        # Creates script.ev_charge_live_command for APK commands with non-admin tokens
+        "command_script": True
     },
     "logging": {
         "level": "info"

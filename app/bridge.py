@@ -18,6 +18,9 @@ from .storage import sanitize_station
 
 BRIDGE_ENTITY_ID = "sensor.ev_charge_live_bridge"
 COMMAND_EVENT = "ev_charge_live_command"
+# HA lets only admins fire events via REST, but any user may call services: this script re-fires
+# the command as COMMAND_EVENT, so the APK also works with a non-admin token.
+COMMAND_SCRIPT_ID = "ev_charge_live_command"
 BRIDGE_PROTOCOL = 1
 # HA's recorder drops (and warns about) state attributes larger than 16 KiB
 BRIDGE_MAX_ATTR_BYTES = 14 * 1024
@@ -115,6 +118,27 @@ def build_bridge_attributes(
     while compact and _json_size(attrs) > max_bytes:
         compact.pop()
     return attrs
+
+
+def command_script_config() -> Dict[str, Any]:
+    """HA script config for script.<COMMAND_SCRIPT_ID>; service data becomes the event data unchanged."""
+    passthrough = {key: "{{ %s | default(none) }}" % key for key in ("request_id", "station", "station_id", "session")}
+    return {
+        "alias": "EV Charge Live: APK-Befehl",
+        "description": (
+            "Angelegt vom Add-on EV Charge Live. Leitet Befehle der Android-App als Event "
+            f"{COMMAND_EVENT} an das Add-on weiter, damit dafür kein Admin-Token nötig ist. "
+            "Das Add-on prüft jeden Befehl wie seine eigenen Eingaben."
+        ),
+        "icon": "mdi:cellphone-link",
+        # Queued: quick successive taps in the app must not be dropped
+        "mode": "queued",
+        "max": 25,
+        "sequence": [{
+            "event": COMMAND_EVENT,
+            "event_data": {"protocol": "{{ protocol | default(1) }}", "action": "{{ action | default('') }}", **passthrough},
+        }],
+    }
 
 
 def command_request_id(data: Any) -> Optional[str]:

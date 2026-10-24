@@ -11,7 +11,17 @@ import logging
 import os
 from typing import Any, Callable, Dict, List, Optional
 
-from .bridge import COMMAND_EVENT, command_ack, command_request_id, parse_command
+import httpx
+
+from . import poller as poller_module
+from .bridge import (
+    COMMAND_EVENT,
+    COMMAND_SCRIPT_ID,
+    command_ack,
+    command_request_id,
+    command_script_config,
+    parse_command,
+)
 from .notifier import notifier
 from .poller import poller
 from .storage import prepare_charge_session, storage
@@ -111,6 +121,32 @@ async def handle_command(data: Any) -> Dict[str, Any]:
     return ack
 
 
+async def ensure_command_script(token: str) -> str:
+    """Creates script.COMMAND_SCRIPT_ID if missing; an existing (possibly user-edited) script is never
+    overwritten. Returns "exists", "created", "disabled" or "failed"."""
+    ha_cfg = storage.load_config().get("home_assistant_integration", {})
+    if not ha_cfg.get("command_script", True):
+        return "disabled"
+    url = f"{poller_module.SUPERVISOR_URL}/config/script/config/{COMMAND_SCRIPT_ID}"
+    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.get(url, headers=headers)
+            if resp.status_code == 200:
+                return "exists"
+            if resp.status_code != 404:
+                _LOGGER.warning("Could not check script.%s: HTTP %s", COMMAND_SCRIPT_ID, resp.status_code)
+                return "failed"
+            resp = await client.post(url, json=command_script_config(), headers=headers)
+            if resp.status_code == 200:
+                _LOGGER.info("Created script.%s so the APK also works with non-admin tokens.", COMMAND_SCRIPT_ID)
+                return "created"
+            _LOGGER.warning("Could not create script.%s: HTTP %s %s", COMMAND_SCRIPT_ID, resp.status_code, resp.text[:200])
+    except Exception as err:
+        _LOGGER.warning("Could not provide script.%s: %s", COMMAND_SCRIPT_ID, err)
+    return "failed"
+
+
 def _messages(raw: Any) -> List[Dict[str, Any]]:
     """Decodes one WebSocket frame; HA may coalesce several messages into a JSON array."""
     data = json.loads(raw)
@@ -133,9 +169,16 @@ def _default_connect(url: str):
 class HaEventListener:
     """Subscribes to COMMAND_EVENT via the Supervisor WebSocket proxy and reconnects with backoff."""
 
-    def __init__(self, connect: Optional[Callable[[str], Any]] = None, url: str = WS_URL) -> None:
+    def __init__(
+        self,
+        connect: Optional[Callable[[str], Any]] = None,
+        url: str = WS_URL,
+        ensure_script: Callable[[str], Any] = ensure_command_script,
+    ) -> None:
         self._connect = connect or _default_connect
         self._url = url
+        self._ensure_script = ensure_script
+        self._script_ready = False
         self._token = os.getenv("SUPERVISOR_TOKEN", "")
         self._task: Optional[asyncio.Task] = None
         self._running = False
@@ -194,6 +237,9 @@ class HaEventListener:
                 raise ConnectionError("Event subscription rejected")
             self.subscribed = True
             _LOGGER.info("Listening for %s events (APK command bridge active).", COMMAND_EVENT)
+            # Core is reachable now; a failed attempt is retried on the next connection
+            if not self._script_ready:
+                self._script_ready = await self._ensure_script(self._token) != "failed"
 
             while True:
                 for msg in _messages(await ws.recv()):

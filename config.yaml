@@ -41,6 +41,7 @@ schema:
     fire_ha_events: "bool"
     mqtt_enabled: "bool"
     mqtt_topic_prefix: "str"
+    command_script: "bool?"
   logging:
     level: "list(debug|info|warning|error)"
 
@@ -69,5 +70,6 @@ options:
     fire_ha_events: true
     mqtt_enabled: false
     mqtt_topic_prefix: "homeassistant/sensor/ev_charge"
+    command_script: true
   logging:
     level: "info"

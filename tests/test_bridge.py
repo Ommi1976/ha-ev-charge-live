@@ -15,10 +15,12 @@ from app.bridge import (
     BRIDGE_ENTITY_ID,
     BRIDGE_MAX_ATTR_BYTES,
     COMMAND_EVENT,
+    COMMAND_SCRIPT_ID,
     build_bridge_attributes,
+    command_script_config,
     parse_command,
 )
-from app.ha_events import HaEventListener, handle_command
+from app.ha_events import HaEventListener, ensure_command_script, handle_command
 from app.main import app
 from app.poller import SyncWorker
 from app.storage import StorageManager
@@ -304,10 +306,25 @@ class _FakeWebSocket:
 
 class TestHaEventListener(unittest.TestCase):
 
-    def _listener(self, ws):
-        listener = HaEventListener(connect=lambda url: ws, url="ws://test/core/websocket")
+    def _listener(self, ws, ensure_script=None):
+        self.ensure_script = ensure_script or AsyncMock(return_value="exists")
+        listener = HaEventListener(connect=lambda url: ws, url="ws://test/core/websocket", ensure_script=self.ensure_script)
         listener._token = "supervisor-token"
         return listener
+
+    def test_command_script_provided_once_after_subscription(self):
+        frames = [{"type": "auth_required"}, {"type": "auth_ok"}, {"id": 1, "type": "result", "success": True}]
+        listener = self._listener(_FakeWebSocket(list(frames)), AsyncMock(return_value="failed"))
+        with self.assertRaises(ConnectionError):
+            asyncio.run(listener.run_session())
+        # Failed attempt is retried on the next connection, success only once
+        self.ensure_script.return_value = "created"
+        for _ in range(2):
+            listener._connect = lambda url: _FakeWebSocket(list(frames))
+            with self.assertRaises(ConnectionError):
+                asyncio.run(listener.run_session())
+        self.assertEqual(self.ensure_script.await_count, 2)
+        self.ensure_script.assert_awaited_with("supervisor-token")
 
     def test_subscribes_and_dispatches_events(self):
         command = CONTRACT["apk_command"]
@@ -370,6 +387,78 @@ class TestHaEventListener(unittest.TestCase):
             return listener._task
 
         self.assertIsNone(asyncio.run(scenario()))
+
+
+def _render_like_ha(template, variables):
+    """Renders a script template the way HA does (Jinja2 + native types via literal_eval)."""
+    import ast
+    import jinja2
+
+    rendered = jinja2.Environment().from_string(template).render(**variables)
+    try:
+        return ast.literal_eval(rendered)
+    except (ValueError, SyntaxError):
+        return rendered
+
+
+class TestCommandScript(unittest.TestCase):
+    """Non-admin tokens: APK calls script.ev_charge_live_command, which re-fires the command event."""
+
+    def test_script_fires_command_event_queued(self):
+        config = command_script_config()
+        self.assertEqual(config["mode"], "queued")
+        self.assertEqual(config["sequence"][0]["event"], COMMAND_EVENT)
+
+    def test_script_passes_apk_command_through_unchanged(self):
+        event_data = command_script_config()["sequence"][0]["event_data"]
+        for command in (
+            CONTRACT["apk_command"],
+            {"protocol": 1, "action": "session_start", "request_id": "apk_s",
+             "session": {"station_id": "123", "station_name": "S", "start_time_ms": 1792850400000}},
+            {"protocol": 1, "action": "watchlist_remove", "request_id": "apk_r", "station_id": "4711"},
+            {"protocol": 1, "action": "sync", "request_id": "apk_y"},
+        ):
+            fired = {key: _render_like_ha(tpl, command) for key, tpl in event_data.items()}
+            self.assertEqual(parse_command(fired), parse_command(command), command["action"])
+
+    def _run_ensure(self, responses, enabled=True):
+        calls = []
+
+        class Client(_FakeAsyncClient):
+            async def get(self, url, headers=None):
+                calls.append(("GET", url, None))
+                return type("R", (), {"status_code": responses["GET"], "text": ""})()
+
+            async def post(self, url, json=None, headers=None):
+                calls.append(("POST", url, json))
+                return type("R", (), {"status_code": responses.get("POST", 200), "text": "err"})()
+
+        config = {"home_assistant_integration": {"command_script": enabled}}
+        with patch.object(ha_events.httpx, "AsyncClient", Client), \
+             patch.object(ha_events.storage, "load_config", return_value=config):
+            result = asyncio.run(ensure_command_script("sup"))
+        return result, calls
+
+    def test_creates_missing_script(self):
+        result, calls = self._run_ensure({"GET": 404, "POST": 200})
+        self.assertEqual(result, "created")
+        self.assertEqual(calls[1][0], "POST")
+        self.assertTrue(calls[1][1].endswith(f"/config/script/config/{COMMAND_SCRIPT_ID}"))
+        self.assertEqual(calls[1][2], command_script_config())
+
+    def test_existing_script_is_never_overwritten(self):
+        result, calls = self._run_ensure({"GET": 200})
+        self.assertEqual(result, "exists")
+        self.assertEqual([c[0] for c in calls], ["GET"])
+
+    def test_option_disables_provisioning(self):
+        result, calls = self._run_ensure({"GET": 404}, enabled=False)
+        self.assertEqual(result, "disabled")
+        self.assertEqual(calls, [])
+
+    def test_failure_reported(self):
+        self.assertEqual(self._run_ensure({"GET": 500})[0], "failed")
+        self.assertEqual(self._run_ensure({"GET": 404, "POST": 400})[0], "failed")
 
 
 class TestIngressStaysClosed(unittest.TestCase):

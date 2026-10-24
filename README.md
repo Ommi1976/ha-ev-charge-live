@@ -66,6 +66,7 @@ Speziell vorkonfiguriert für alle Ladestationen der **Stadtwerke Hockenheim** s
 | `home_assistant_integration.entity_prefix` | `sensor.ev_charge_` | Präfix für generierte Sensoren. |
 | `home_assistant_integration.create_device_tracker`| `true` | Zeigt Säulen als Device Tracker auf der HA-Karte. |
 | `home_assistant_integration.fire_ha_events` | `true` | Feuert `ev_charge_slot_freed` im Eventbus. |
+| `home_assistant_integration.command_script` | `true` | Legt `script.ev_charge_live_command` an, damit die APK auch mit Nicht-Admin-Token Befehle senden kann. |
 
 ---
 
@@ -82,7 +83,8 @@ Das Add-on abonniert das Event über die Supervisor-WebSocket-API und bestätigt
 
 **Einrichtung:** In der Add-on-Oberfläche unter *Einstellungen → 1-Klick Smartphone-Kopplung* den QR-Code mit der APK scannen (oder URL + Token in der APK eintragen und *Verbindung testen*).
 * Für unterwegs die **externe URL** eintragen (z. B. Nabu Casa `https://….ui.nabu.casa`), nicht `homeassistant.local`.
-* Der Long-Lived-Token muss zu einem **Admin-Benutzer** gehören (HA erlaubt Events über die REST-API nur Admins).
+* **Kein Admin-Token nötig:** Am besten einen eigenen HA-Benutzer ohne Admin-Rechte für die APK anlegen und dessen Long-Lived-Token verwenden. HA erlaubt Events über die REST-API nur Admins; Nicht-Admins dürfen aber Dienste aufrufen. Das Add-on legt deshalb beim Start das Skript `script.ev_charge_live_command` an (nur wenn es fehlt, ein vorhandenes wird nie überschrieben), das die Befehle als `ev_charge_live_command` weiterleitet. Die APK nutzt es automatisch, sobald HA das direkte Event ablehnt. Abschaltbar mit `home_assistant_integration.command_script: false`.
+* Beachte: Das Skript kann jeder HA-Benutzer aufrufen. Es erlaubt nur die unten genannten Befehle, die das Add-on wie seine eigenen Eingaben prüft.
 * Optional: `sensor.ev_charge_live_bridge` im Recorder ausschließen, wenn du keinen Verlauf davon brauchst.
 
 Befehle lassen sich auch aus eigenen Automationen senden:
