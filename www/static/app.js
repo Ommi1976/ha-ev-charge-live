@@ -158,7 +158,7 @@ function resetHaBridgeCache() {
 function describeHaHttpError(status) {
     if (status === 401) return "Token ungültig oder abgelaufen";
     if (status === 403) return "Zugriff von Home Assistant verweigert";
-    if (status === 404) return "Add-on-Sensor fehlt – läuft EV Charge Live ab v1.3.19?";
+    if (status === 404) return "Add-on-Sensor fehlt – läuft EV Charge Live ab v1.3.20?";
     return status ? `Home Assistant antwortet mit HTTP ${status}` : "Home Assistant nicht erreichbar";
 }
 
@@ -215,7 +215,7 @@ async function postHaCommand(command, ha = getHaRemoteConfig()) {
 
 function describeHaCommandError(res) {
     if (res && res.viaScript && res.status === 400) {
-        return `Token ohne Admin-Rechte und Skript script.${HA_COMMAND_SCRIPT} fehlt – Add-on ab v1.3.19 starten oder Admin-Token nutzen`;
+        return `Token ohne Admin-Rechte und Skript script.${HA_COMMAND_SCRIPT} fehlt – Add-on ab v1.3.20 starten oder Admin-Token nutzen`;
     }
     return describeHaHttpError(res ? res.status : 0);
 }
@@ -365,7 +365,7 @@ async function runHaCommand(action, payload = {}, { ackTimeoutMs = 8000 } = {}) 
         return { delivered: false, acked: false, ok: false, error: describeHaCommandError(res) };
     }
     const ack = await waitForHaCommandAck(requestId, ackTimeoutMs);
-    if (!ack) return { delivered: true, acked: false, ok: false, error: "Add-on hat nicht bestätigt – läuft EV Charge Live ab v1.3.19?" };
+    if (!ack) return { delivered: true, acked: false, ok: false, error: "Add-on hat nicht bestätigt – läuft EV Charge Live ab v1.3.20?" };
     return { delivered: true, acked: true, ok: Boolean(ack.ok), error: ack.error || "" };
 }
 
@@ -3063,7 +3063,7 @@ window.clearObdDebugLog = function() {
 window.copyObdDebugLog = async function() {
     const metaEl = document.getElementById("obd-diag-meta");
     const header = [
-        "=== EV Charge Live OBD2 Diagnose-Protokoll (v1.3.19) ===",
+        "=== EV Charge Live OBD2 Diagnose-Protokoll (v1.3.20) ===",
         `Zeitpunkt: ${new Date().toISOString()}`,
         `Treiber-Info: ${metaEl ? metaEl.textContent : "n/a"}`,
         `Verbindungsstatus: connected=${bleConnection.connected}, connecting=${bleConnection.connecting}, transport=${bleConnection.transport || "none"}, deviceId=${bleConnection.deviceId || "none"}`,
